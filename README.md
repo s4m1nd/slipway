@@ -329,3 +329,7 @@ scripts/live/prepare-server.sh <user@host> --stop-system-caddy --print-commands
 scripts/live/smoke.sh --print-commands
 scripts/live/restore-caddy.sh <user@host> /root/slipway-backups/<timestamp> --print-commands
 ```
+
+## License
+
+Apache License 2.0. See [LICENSE](./LICENSE).
