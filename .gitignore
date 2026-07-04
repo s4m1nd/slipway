@@ -1,0 +1,10 @@
+/bin/
+/dist/
+.tmp/
+*.test
+coverage.out
+.DS_Store
+.env
+slipway.local.yml
+slipway.live.yml
+.public-hygiene-denylist

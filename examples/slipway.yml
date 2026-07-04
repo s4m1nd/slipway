@@ -1,0 +1,65 @@
+project: demo
+
+retention:
+  releases: 5
+
+registry:
+  server: ghcr.io
+  username: demo
+  password_secret: REGISTRY_PASSWORD
+
+secrets:
+  names:
+    - REGISTRY_PASSWORD
+    - DATABASE_URL
+    - REDIS_URL
+
+environments:
+  production:
+    servers:
+      app-1:
+        host: 203.0.113.10
+        ssh_user: root
+        host_ssh_port: 22
+      worker-1:
+        host: 203.0.113.11
+        ssh_user: root
+        host_ssh_port: 22
+    proxy:
+      listen_http: :80
+      listen_https: :443
+      routes:
+        - host: app.example.com
+          service: web
+          tls: true
+    services:
+      web:
+        image: ghcr.io/example/demo-web
+        build:
+          context: .
+          dockerfile: Dockerfile
+          platform: linux/amd64
+        hosts: [app-1]
+        internal_port: 3000
+        health_check:
+          path: /healthz
+          interval: 5s
+          timeout: 2s
+          retries: 12
+        env:
+          RACK_ENV: production
+        secrets:
+          - DATABASE_URL
+          - REDIS_URL
+      worker:
+        image: ghcr.io/example/demo-worker
+        build:
+          context: .
+          dockerfile: Dockerfile.worker
+          platform: linux/amd64
+        hosts: [worker-1]
+        env:
+          RACK_ENV: production
+        secrets:
+          - DATABASE_URL
+          - REDIS_URL

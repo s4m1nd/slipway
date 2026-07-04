@@ -1,0 +1,45 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: make check
+
+      - name: Build release artifacts
+        run: scripts/release/build.sh "${GITHUB_REF_NAME}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease_flag=
+          case "${GITHUB_REF_NAME}" in
+            *alpha*|*beta*|*rc*) prerelease_flag=--prerelease ;;
+          esac
+
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/slipway_darwin_amd64 \
+            dist/slipway_darwin_arm64 \
+            dist/slipway_linux_amd64 \
+            dist/slipway_linux_arm64 \
+            dist/checksums.txt \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            $prerelease_flag

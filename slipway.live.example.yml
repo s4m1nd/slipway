@@ -1,0 +1,50 @@
+project: slipway_live
+
+retention:
+  releases: 5
+
+registry:
+  server: ghcr.io
+  username: <registry-username>
+  password:
+    - REGISTRY_PASSWORD
+
+secrets:
+  provider:
+    type: 1password
+    account: <1password-account>
+    vault: <vault-id-or-name>
+    item: <item-id-or-name>
+  names:
+    - REGISTRY_PASSWORD
+
+environments:
+  production:
+    servers:
+      app-1:
+        host: 203.0.113.10
+        ssh_user: root
+        host_ssh_port: 22
+    proxy:
+      listen_http: :80
+      listen_https: :443
+      routes:
+        - host: http://203.0.113.10
+          service: web
+          tls: false
+    services:
+      web:
+        image: ghcr.io/<owner>/slipway-live-nginx
+        build:
+          context: examples/live-nginx
+          dockerfile: Dockerfile
+          platform: linux/amd64
+          args:
+            - MOCK_VERSION=unknown
+        hosts: [app-1]
+        internal_port: 80
+        health_check:
+          path: /healthz
+          interval: 5s
+          timeout: 2s
+          retries: 12
