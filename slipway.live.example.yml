@@ -17,6 +17,7 @@ secrets:
     item: <item-id-or-name>
   names:
     - REGISTRY_PASSWORD
+    - HCLOUD_TOKEN
 
 environments:
   production:

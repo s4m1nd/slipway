@@ -23,8 +23,8 @@ func TestPublicRepoHygiene(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			switch path {
-			case ".git", ".tmp", "bin", "dist":
+			switch filepath.Base(path) {
+			case ".git", ".terraform", ".tmp", "bin", "dist":
 				return filepath.SkipDir
 			}
 			return nil
@@ -68,8 +68,10 @@ func TestPublicRepoHygiene(t *testing.T) {
 
 func shouldCheckPublicHygiene(path string) bool {
 	switch filepath.Ext(path) {
-	case ".go", ".sh", ".md", ".yml", ".yaml", ".mod", ".sum", "":
+	case ".go", ".sh", ".md", ".yml", ".yaml", ".tf", ".tftpl", ".mod", ".sum", "":
 		return true
+	case ".example":
+		return strings.HasSuffix(path, ".tfvars.example")
 	default:
 		return false
 	}

@@ -38,8 +38,8 @@ func TestCanonicalModulePathIsUsedEverywhere(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			switch path {
-			case ".git", "dist":
+			switch filepath.Base(path) {
+			case ".git", ".terraform", "dist":
 				return filepath.SkipDir
 			}
 			return nil
@@ -66,8 +66,10 @@ func TestCanonicalModulePathIsUsedEverywhere(t *testing.T) {
 
 func shouldCheckModulePath(path string) bool {
 	switch filepath.Ext(path) {
-	case ".go", ".sh", ".md", ".yml", ".yaml", ".mod", ".sum":
+	case ".go", ".sh", ".md", ".yml", ".yaml", ".tf", ".tftpl", ".mod", ".sum":
 		return true
+	case ".example":
+		return strings.HasSuffix(path, ".tfvars.example")
 	default:
 		return false
 	}

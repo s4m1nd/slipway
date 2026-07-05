@@ -16,6 +16,7 @@ slipway status -c slipway.yml --env production [--dry-run]
 slipway sync-proxy -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
 slipway cleanup -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
 slipway logs -c slipway.yml --env production --service web [--host app-1] [--color active] [--tail 100] [--follow] [--dry-run]
+slipway secrets exec -c slipway.yml --secret NAME [--secret NAME ...] [--dry-run] -- command [args...]
 slipway version
 ```
 
@@ -41,6 +42,42 @@ The installer downloads the matching `darwin` or `linux` binary for `amd64` or `
 scripts/install.sh --help
 scripts/install.sh --dry-run
 ```
+
+## Requirements
+
+Local machine:
+
+- Slipway installed, or Go installed when running `go run ./cmd/slipway`.
+- Docker installed locally for `deploy`, because Slipway builds and pushes
+  service images before it connects to hosts.
+- A registry account and registry credentials for the configured image
+  repository.
+- SSH access to each target server.
+- Terraform only when using the optional
+  `examples/terraform/hetzner-single-node` host example.
+
+Target servers:
+
+- Docker available to the configured SSH user without an interactive sudo
+  prompt.
+- The configured SSH user can write under `/opt/slipway`.
+- Ports 80 and 443 are available when the environment uses Slipway-managed
+  Caddy proxy routes.
+
+Secrets:
+
+- By default, Slipway reads secret names from the local environment, such as
+  `REGISTRY_PASSWORD`.
+- `secrets.fetch` can call any command that prints `KEY=VALUE` lines.
+- Only built-in secret provider today is `1password`. Other providers can still
+  be used through `secrets.fetch`.
+
+Useful starting points:
+
+- `slipway.example.yml` is the compact config example.
+- `slipway.live.example.yml` is a local, ignored real-server template.
+- `examples/terraform/hetzner-single-node` creates a single Hetzner host.
+- `examples/live-nginx` is the optional real-host smoke test.
 
 ## Deployment Flow
 
@@ -252,6 +289,20 @@ secrets:
 
 For headless automation, set `OP_SERVICE_ACCOUNT_TOKEN` in the runner environment so `op read` can authenticate without the desktop app. For simple local runs without a configured provider, exporting `REGISTRY_PASSWORD=<ghcr token>` is enough.
 
+`slipway secrets exec` resolves selected names from the same `secrets` provider
+and injects them into a child command environment:
+
+```sh
+slipway secrets exec -c slipway.yml --secret HCLOUD_TOKEN -- \
+  terraform -chdir=examples/terraform/hetzner-single-node plan
+```
+
+This does not mutate your current shell environment, and `--dry-run` prints a
+redacted command plan without resolving or printing secret values. Deploy only
+resolves the registry password secret plus service secrets used by the selected
+environment, so extra names in `secrets.names` can be used by other commands
+without being fetched on every deploy.
+
 ## Architecture
 
 ```text
@@ -293,6 +344,27 @@ go run ./cmd/slipway logs -c slipway.example.yml --env production --service web 
 ```
 
 Release steps live in [`docs/releasing.md`](./docs/releasing.md).
+
+## Infrastructure Examples
+
+[`examples/terraform/hetzner-single-node`](./examples/terraform/hetzner-single-node)
+creates one Hetzner Cloud Ubuntu host with Docker, automatic security updates,
+`fail2ban`, and a provider firewall that opens SSH only to admin CIDRs plus
+public HTTP/HTTPS for Slipway-managed Caddy. It outputs a ready-to-copy
+`servers` block for `slipway.yml`.
+
+Terraform examples are not part of CI. Keep provider tokens in `HCLOUD_TOKEN`
+and keep registry credentials, app secrets, and 1Password metadata out of
+Terraform variables, cloud-init, plans, and state.
+
+Use `secrets exec` when `HCLOUD_TOKEN` lives in your configured secret provider:
+
+```sh
+slipway secrets exec -c slipway.live.yml --secret HCLOUD_TOKEN -- \
+  terraform -chdir=examples/terraform/hetzner-single-node init
+slipway secrets exec -c slipway.live.yml --secret HCLOUD_TOKEN -- \
+  terraform -chdir=examples/terraform/hetzner-single-node apply
+```
 
 ## Alpha Notes
 

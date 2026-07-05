@@ -1,0 +1,20 @@
+name                = "slipway-demo"
+location            = "hel1"
+server_type         = "cx23"
+image               = "ubuntu-24.04"
+admin_user          = "deploy"
+ssh_public_key      = ""
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+
+# Set this to an existing Hetzner Cloud SSH key name when the public key is
+# already uploaded to the project.
+existing_ssh_key_name = ""
+
+# Replace this documentation range with your current public IP/CIDR before apply.
+admin_cidrs = ["198.51.100.10/32"]
+
+enable_backups = false
+
+labels = {
+  app = "slipway"
+}

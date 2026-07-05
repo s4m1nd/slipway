@@ -75,6 +75,16 @@ func ValidateEnv(cfg Config, envName string) error {
 	return nil
 }
 
+func ValidateSecretsSelection(secrets Secrets, names []string) error {
+	ve := &ValidationError{}
+	validateSecrets(ve, "secrets", secrets)
+	validateSecretReferences(ve, "requested secrets", names, secretSet(secrets.Names))
+	if ve.empty() {
+		return nil
+	}
+	return ve
+}
+
 func ApplyDefaults(cfg Config) Config {
 	cfg.Registry = applyRegistryDefaults(cfg.Registry)
 	if !cfg.Retention.releasesSet {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -124,6 +125,8 @@ func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runLogs(args[1:], stdout, stderr)
 	case "cleanup":
 		return runCleanup(args[1:], stdout, stderr)
+	case "secrets":
+		return runSecrets(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", cmd)
 		printUsage(stderr)
@@ -144,6 +147,7 @@ Usage:
   slipway sync-proxy -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
   slipway cleanup -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
   slipway logs -c slipway.yml --env production --service web [--host app-1] [--color active] [--tail 100] [--follow] [--dry-run]
+  slipway secrets exec -c slipway.yml --secret NAME [--secret NAME ...] [--dry-run] -- command [args...]
   slipway version`)
 }
 
@@ -244,7 +248,7 @@ func runDeploy(args []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "create secret resolver: %v\n", err)
 			return 1
 		}
-		resolved, err := resolver.Resolve(context.Background(), p.Config.Secrets.Names)
+		resolved, err := resolver.Resolve(context.Background(), p.DeploySecretNames())
 		if err != nil {
 			fmt.Fprintf(stderr, "resolve secrets: %v\n", err)
 			return 1
@@ -262,6 +266,131 @@ func runDeploy(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 0
 	}
 	return executePlan(plan, stdout, stderr)
+}
+
+func runSecrets(args []string, stdout io.Writer, stderr io.Writer) int {
+	if len(args) == 0 {
+		printSecretsUsage(stderr)
+		return 2
+	}
+	switch args[0] {
+	case "exec":
+		return runSecretsExec(args[1:], stdout, stderr)
+	case "help", "-h", "--help":
+		printSecretsUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown secrets command %q\n\n", args[0])
+		printSecretsUsage(stderr)
+		return 2
+	}
+}
+
+func printSecretsUsage(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  slipway secrets exec -c slipway.yml --secret NAME [--secret NAME ...] [--dry-run] -- command [args...]`)
+}
+
+func runSecretsExec(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("secrets exec", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("c", "slipway.yml", "config path")
+	dryRun := fs.Bool("dry-run", false, "print the redacted command plan without resolving secrets")
+	var selected secretNameFlags
+	fs.Var(&selected, "secret", "secret name to inject into the child environment; repeatable")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if len(selected) == 0 {
+		fmt.Fprintln(stderr, "--secret is required")
+		return 2
+	}
+	commandArgs := fs.Args()
+	if len(commandArgs) == 0 {
+		fmt.Fprintln(stderr, "command is required after --")
+		return 2
+	}
+
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load config: %v\n", err)
+		return 1
+	}
+	if err := config.ValidateSecretsSelection(cfg.Secrets, []string(selected)); err != nil {
+		fmt.Fprintf(stderr, "invalid secrets config:\n%v\n", err)
+		return 1
+	}
+
+	if *dryRun {
+		remote.Plan{
+			Title: "Secrets exec",
+			Commands: []remote.Command{{
+				Description: fmt.Sprintf("resolve %d secret%s and run child command", len(selected), plural(len(selected))),
+				Script:      strings.Join(commandArgs, " "),
+				Sensitive:   true,
+			}},
+		}.Print(stdout)
+		return 0
+	}
+
+	resolver, err := secrets.NewResolver(cfg.Secrets)
+	if err != nil {
+		fmt.Fprintf(stderr, "create secret resolver: %v\n", err)
+		return 1
+	}
+	resolved, err := resolver.Resolve(context.Background(), []string(selected))
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve secrets: %v\n", err)
+		return 1
+	}
+	if err := runChildWithSecrets(context.Background(), commandArgs, resolved, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "run child command: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+type secretNameFlags []string
+
+func (f *secretNameFlags) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *secretNameFlags) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("secret name must not be empty")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
+func runChildWithSecrets(ctx context.Context, args []string, resolved map[string]string, stdout io.Writer, stderr io.Writer) error {
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Stdin = os.Stdin
+	cmd.Env = envWithSecrets(os.Environ(), resolved)
+	return cmd.Run()
+}
+
+func envWithSecrets(base []string, resolved map[string]string) []string {
+	secretNames := map[string]bool{}
+	for key := range resolved {
+		secretNames[key] = true
+	}
+	out := make([]string, 0, len(base)+len(resolved))
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && secretNames[key] {
+			continue
+		}
+		out = append(out, entry)
+	}
+	for key, value := range resolved {
+		out = append(out, key+"="+value)
+	}
+	return out
 }
 
 func runStatus(args []string, stdout io.Writer, stderr io.Writer) int {

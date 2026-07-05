@@ -85,6 +85,28 @@ func (p *Planner) WithSecrets(secrets map[string]string) *Planner {
 	return p
 }
 
+func (p *Planner) DeploySecretNames() []string {
+	seen := map[string]bool{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			seen[name] = true
+		}
+	}
+	add(p.Config.Registry.PasswordSecret)
+	for _, serviceName := range sortedServiceNames(p.Env.Services) {
+		for _, name := range p.Env.Services[serviceName].Secrets {
+			add(name)
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (p *Planner) Provision() remote.Plan {
 	var commands []remote.Command
 	for _, server := range p.servers() {

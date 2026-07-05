@@ -491,6 +491,7 @@ func TestHelpIncludesEveryMVPCommand(t *testing.T) {
 		"slipway sync-proxy -c slipway.yml --env production [--dry-run]",
 		"slipway cleanup -c slipway.yml --env production [--dry-run]",
 		"slipway logs -c slipway.yml --env production --service web",
+		"slipway secrets exec -c slipway.yml --secret NAME",
 		"slipway version",
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -674,6 +675,128 @@ func TestLogsDryRunDoesNotResolveSecrets(t *testing.T) {
 	}
 }
 
+func TestSecretsExecInjectsOnlySelectedSecretsIntoChildEnv(t *testing.T) {
+	dir := t.TempDir()
+	requestedPath := filepath.Join(dir, "requested-secrets")
+	fetchPath := filepath.Join(dir, "fetch-secrets.sh")
+	writeExecutable(t, fetchPath, `#!/bin/sh
+printf '%s' "$SLIPWAY_SECRET_NAMES" > `+shellQuoteForTest(requestedPath)+`
+case ",$SLIPWAY_SECRET_NAMES," in
+  *,HCLOUD_TOKEN,*) printf 'HCLOUD_TOKEN=hcloud-secret\n' ;;
+esac
+case ",$SLIPWAY_SECRET_NAMES," in
+  *,DATABASE_URL,*) printf 'DATABASE_URL=db-secret\n' ;;
+esac
+case ",$SLIPWAY_SECRET_NAMES," in
+  *,REGISTRY_PASSWORD,*) printf 'REGISTRY_PASSWORD=registry-secret\n' ;;
+esac
+`)
+	path := filepath.Join(dir, "slipway.yml")
+	if err := os.WriteFile(path, []byte(configWithFetchAndHCLOUD(fetchPath)), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := Execute([]string{
+		"secrets", "exec", "-c", path, "--secret", "HCLOUD_TOKEN", "--",
+		"sh", "-c", `printf 'token=%s db=%s\n' "$HCLOUD_TOKEN" "${DATABASE_URL-unset}"`,
+	}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("secrets exec code=%d stderr=%s stdout=%s", code, errOut.String(), out.String())
+	}
+	if got := out.String(); got != "token=hcloud-secret db=unset\n" {
+		t.Fatalf("child env output = %q", got)
+	}
+	if got := readTestFile(t, requestedPath); got != "HCLOUD_TOKEN" {
+		t.Fatalf("requested secrets = %q, want HCLOUD_TOKEN", got)
+	}
+}
+
+func TestSecretsExecDryRunRedactsCommandAndDoesNotResolveSecrets(t *testing.T) {
+	dir := t.TempDir()
+	fetchPath := filepath.Join(dir, "fetch-secrets.sh")
+	writeExecutable(t, fetchPath, `#!/bin/sh
+printf 'super-secret-token\n' >&2
+exit 42
+`)
+	path := filepath.Join(dir, "slipway.yml")
+	if err := os.WriteFile(path, []byte(configWithFetchAndHCLOUD(fetchPath)), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := Execute([]string{
+		"secrets", "exec", "-c", path, "--secret", "HCLOUD_TOKEN", "--dry-run", "--",
+		"terraform", "-chdir=examples/terraform/hetzner-single-node", "apply",
+	}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("secrets exec dry-run code=%d stderr=%s stdout=%s", code, errOut.String(), out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "Secrets exec") || !strings.Contains(got, "<sensitive command redacted>") {
+		t.Fatalf("dry-run output should show a redacted plan:\n%s", got)
+	}
+	for _, forbidden := range []string{"super-secret-token", "HCLOUD_TOKEN", "terraform"} {
+		if strings.Contains(got, forbidden) || strings.Contains(errOut.String(), forbidden) {
+			t.Fatalf("dry-run leaked %q\nstdout:\n%s\nstderr:\n%s", forbidden, got, errOut.String())
+		}
+	}
+}
+
+func TestDeployResolvesOnlySecretsNeededBySelectedEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	requestedPath := filepath.Join(dir, "deploy-requested-secrets")
+	fetchPath := filepath.Join(dir, "fetch-secrets.sh")
+	writeExecutable(t, fetchPath, `#!/bin/sh
+printf '%s' "$SLIPWAY_SECRET_NAMES" > `+shellQuoteForTest(requestedPath)+`
+case ",$SLIPWAY_SECRET_NAMES," in
+  *,HCLOUD_TOKEN,*)
+    echo "HCLOUD_TOKEN should not be resolved during deploy" >&2
+    exit 42
+    ;;
+esac
+printf 'REGISTRY_PASSWORD=registry-secret\n'
+printf 'DATABASE_URL=postgres://example\n'
+printf 'REDIS_URL=redis://example\n'
+`)
+	path := filepath.Join(dir, "slipway.yml")
+	if err := os.WriteFile(path, []byte(configWithFetchAndHCLOUD(fetchPath)), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	fakeBin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "docker"), `#!/bin/sh
+if [ "$1" = "login" ]; then
+  cat >/dev/null
+fi
+exit 0
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+exit 0
+`)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := Execute([]string{"deploy", "-c", path, "--env", "production"}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("deploy code=%d stderr=%s stdout=%s", code, errOut.String(), out.String())
+	}
+	requested := strings.Split(readTestFile(t, requestedPath), ",")
+	if stringSliceContains(requested, "HCLOUD_TOKEN") {
+		t.Fatalf("deploy requested HCLOUD_TOKEN: %v", requested)
+	}
+	for _, want := range []string{"REGISTRY_PASSWORD", "DATABASE_URL", "REDIS_URL"} {
+		if !stringSliceContains(requested, want) {
+			t.Fatalf("deploy requested secrets %v, missing %s", requested, want)
+		}
+	}
+}
+
 func TestLogsWithoutServiceFailsClearly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "slipway.yml")
@@ -757,6 +880,40 @@ func TestExecuteLogsPrintsHeadersForMultipleTargetsWithoutDumpingScripts(t *test
 
 type recordingLogsRunner struct {
 	commands []remote.Command
+}
+
+func configWithFetchAndHCLOUD(fetchPath string) string {
+	configText := strings.Replace(exampleConfig, "secrets:\n  names:", "secrets:\n  fetch: sh "+shellQuoteForTest(fetchPath)+"\n  names:", 1)
+	return strings.Replace(configText, "    - REGISTRY_PASSWORD\n", "    - REGISTRY_PASSWORD\n    - HCLOUD_TOKEN\n", 1)
+}
+
+func writeExecutable(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write executable %s: %v", path, err)
+	}
+}
+
+func readTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func shellQuoteForTest(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func (r *recordingLogsRunner) Run(_ context.Context, command remote.Command) error {
