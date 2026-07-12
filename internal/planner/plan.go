@@ -193,7 +193,11 @@ func (p *Planner) Deploy(now time.Time) (remote.Plan, error) {
 		}
 	}
 	commands = append(commands, p.cleanupCommands()...)
-	return remote.Plan{Title: fmt.Sprintf("Deploy %s/%s release %s", p.Config.Project, p.EnvName, rel.ID), Commands: commands}, nil
+	return remote.Plan{
+		Title:    fmt.Sprintf("Deploy %s/%s", p.Config.Project, p.EnvName),
+		Subtitle: "Release " + rel.ID,
+		Commands: commands,
+	}, nil
 }
 
 func (p *Planner) Cleanup() remote.Plan {

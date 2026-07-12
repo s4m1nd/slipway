@@ -9,18 +9,22 @@ CI systems such as GitHub Actions are only runners. The same command should work
 ```sh
 slipway init [-c slipway.yml] [--force]
 slipway validate -c slipway.yml [--env production]
-slipway provision -c slipway.yml --env production [--dry-run]
-slipway deploy -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
-slipway rollback -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
+slipway provision -c slipway.yml --env production [--dry-run] [--verbose]
+slipway deploy -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
+slipway rollback -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
 slipway status -c slipway.yml --env production [--dry-run]
-slipway sync-proxy -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
-slipway cleanup -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
+slipway sync-proxy -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
+slipway cleanup -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
 slipway logs -c slipway.yml --env production --service web [--host app-1] [--color active] [--tail 100] [--follow] [--dry-run]
 slipway secrets exec -c slipway.yml --secret NAME [--secret NAME ...] [--dry-run] -- command [args...]
 slipway version
 ```
 
-`provision`, `deploy`, `rollback`, `status`, `sync-proxy`, `cleanup`, and `logs` execute by default. Use `--dry-run` to print the command plan without running Docker or SSH commands.
+`provision`, `deploy`, `rollback`, `status`, `sync-proxy`, `cleanup`, and `logs` execute by default. Normal execution prints concise progress without dumping generated shell. Use `--verbose` on mutating commands to include non-sensitive generated shell, or `--dry-run` to print the detailed command plan without running Docker or SSH commands. Sensitive commands are always redacted.
+
+Subprocess output is indented beneath its step. Routine successful login, image-pull, and Caddy messages are compacted, while warnings remain visible; failures replay the captured details. Successful deploys and rollbacks finish with the active color, release, and total elapsed time.
+
+Color is enabled automatically for terminal output and disabled for redirected output, `TERM=dumb`, or when `NO_COLOR` is present. Set `SLIPWAY_COLOR=always`, `SLIPWAY_COLOR=never`, or `SLIPWAY_COLOR=auto` to override or restore automatic detection.
 
 ## Install
 
@@ -308,6 +312,7 @@ without being fetched on every deploy.
 ```text
 cmd/slipway
   internal/cli        CLI parsing and command execution
+  internal/console    TTY-aware styling and structured progress output
   internal/config     YAML schema, defaults, strict loading, validation
   internal/planner    Blue/green orchestration order
   internal/runtime    Docker runtime command generation

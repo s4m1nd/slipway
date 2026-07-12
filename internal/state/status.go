@@ -6,6 +6,8 @@ import (
 	"io"
 	"sort"
 	"strings"
+
+	"github.com/s4m1nd/slipway/internal/console"
 )
 
 type Target struct {
@@ -116,9 +118,14 @@ func ParseServiceStatus(target Target, output string) (ServiceStatus, error) {
 }
 
 func RenderReport(w io.Writer, project string, environment string, statuses []ServiceStatus) {
-	fmt.Fprintf(w, "%s/%s status\n\n", project, environment)
+	RenderReportWithConsole(console.New(w, w), project, environment, statuses)
+}
+
+func RenderReportWithConsole(c console.Console, project string, environment string, statuses []ServiceStatus) {
+	c.Title(fmt.Sprintf("%s/%s status", project, environment))
+	fmt.Fprintln(c.Out)
 	if len(statuses) == 0 {
-		fmt.Fprintln(w, "  no services")
+		fmt.Fprintln(c.Out, "  no services")
 		return
 	}
 
@@ -129,17 +136,62 @@ func RenderReport(w io.Writer, project string, environment string, statuses []Se
 		return statuses[i].HostID() < statuses[j].HostID()
 	})
 
-	fmt.Fprintf(w, "%-12s %-28s %-24s %-24s %-10s %-10s\n", "SERVICE", "HOST", "ACTIVE", "PREVIOUS", "BLUE", "GREEN")
+	writeStatusRow(c,
+		statusCell{"SERVICE", 12, []console.Style{console.StyleBold}},
+		statusCell{"HOST", 28, []console.Style{console.StyleBold}},
+		statusCell{"ACTIVE", 24, []console.Style{console.StyleBold}},
+		statusCell{"PREVIOUS", 24, []console.Style{console.StyleBold}},
+		statusCell{"BLUE", 10, []console.Style{console.StyleBold, console.StyleBlue}},
+		statusCell{"GREEN", 10, []console.Style{console.StyleBold, console.StyleGreen}},
+	)
 	for _, status := range statuses {
-		fmt.Fprintf(w, "%-12s %-28s %-24s %-24s %-10s %-10s\n",
-			status.Service,
-			status.HostID(),
-			releaseSummary(status.StateExists, status.Active),
-			releaseSummary(status.StateExists, status.Previous),
-			containerSummary(status.Blue),
-			containerSummary(status.Green),
+		writeStatusRow(c,
+			statusCell{status.Service, 12, nil},
+			statusCell{status.HostID(), 28, []console.Style{console.StyleDim}},
+			statusCell{releaseSummary(status.StateExists, status.Active), 24, releaseStyles(status.Active)},
+			statusCell{releaseSummary(status.StateExists, status.Previous), 24, releaseStyles(status.Previous)},
+			statusCell{containerSummary(status.Blue), 10, containerStyles(status.Blue)},
+			statusCell{containerSummary(status.Green), 10, containerStyles(status.Green)},
 		)
 	}
+}
+
+type statusCell struct {
+	text   string
+	width  int
+	styles []console.Style
+}
+
+func writeStatusRow(c console.Console, cells ...statusCell) {
+	for i, cell := range cells {
+		if i > 0 {
+			fmt.Fprint(c.Out, " ")
+		}
+		padded := fmt.Sprintf("%-*s", cell.width, cell.text)
+		fmt.Fprint(c.Out, c.Paint(padded, cell.styles...))
+	}
+	fmt.Fprintln(c.Out)
+}
+
+func releaseStyles(release Release) []console.Style {
+	switch release.Color {
+	case "blue":
+		return []console.Style{console.StyleBlue}
+	case "green":
+		return []console.Style{console.StyleGreen}
+	default:
+		return nil
+	}
+}
+
+func containerStyles(container Container) []console.Style {
+	if !container.Exists {
+		return []console.Style{console.StyleDim}
+	}
+	if container.Running {
+		return []console.Style{console.StyleGreen}
+	}
+	return []console.Style{console.StyleYellow}
 }
 
 func (s ServiceStatus) HostID() string {

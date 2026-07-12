@@ -9,7 +9,23 @@ import (
 	"time"
 
 	"github.com/s4m1nd/slipway/internal/config"
+	"github.com/s4m1nd/slipway/internal/remote"
 )
+
+func TestRoutineRegistryAndStartOutputIsQuietOnSuccess(t *testing.T) {
+	docker := Docker{Project: "demo", EnvName: "production", Root: "/opt/slipway/demo/production", Network: "demo_production"}
+	server := config.Server{Host: "203.0.113.10", SSHUser: "root", SSHPort: 22}
+	commands := []remote.Command{
+		docker.LoginLocal(config.Registry{Server: "ghcr.io", Username: "demo"}, "secret"),
+		docker.LoginRemote(server, config.Registry{Server: "ghcr.io", Username: "demo"}, "secret"),
+		docker.StartService(server, "web", config.Service{}, "ghcr.io/demo/web:release", "release"),
+	}
+	for _, command := range commands {
+		if command.OutputMode != remote.OutputQuietOnSuccess {
+			t.Fatalf("%q output mode = %q, want quiet-on-success", command.Description, command.OutputMode)
+		}
+	}
+}
 
 func TestRecordActiveScriptPreservesPreviousState(t *testing.T) {
 	docker := Docker{Project: "demo", EnvName: "production", Root: "/opt/slipway/demo/production", Network: "demo_production"}

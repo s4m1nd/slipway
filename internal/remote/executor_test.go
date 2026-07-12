@@ -5,9 +5,83 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/s4m1nd/slipway/internal/console"
 )
 
-func TestExecutePrintsRedactedSensitiveSteps(t *testing.T) {
+func TestExecutePrintsConciseStepsWithoutGeneratedScripts(t *testing.T) {
+	plan := Plan{Title: "Deploy demo/production", Subtitle: "Release release-a", Commands: []Command{{
+		Description: "build image for web",
+		Script:      "docker build --secret-value",
+	}}}
+	var out strings.Builder
+
+	if err := Execute(context.Background(), plan, &recordingRunner{}, &out); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"Deploy demo/production", "Release release-a", "1/1", "build image for web", "local", "✓ complete", "("} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("concise output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "docker build") || strings.Contains(got, "--secret-value") {
+		t.Fatalf("normal execution dumped generated script:\n%s", got)
+	}
+}
+
+func TestExecutePrintsSemanticStepResults(t *testing.T) {
+	plan := Plan{Commands: []Command{
+		{Description: "start inactive web release"},
+		{Description: "wait for web health check"},
+		{Description: "switch Caddy routes"},
+		{Description: "record active web release"},
+	}}
+	var out strings.Builder
+	if err := Execute(context.Background(), plan, &recordingRunner{}, &out); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	for _, want := range []string{"✓ container started", "✓ healthy", "✓ traffic switched", "✓ state recorded"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("semantic output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestExecuteVerbosePrintsOnlyNonSensitiveScripts(t *testing.T) {
+	plan := Plan{Commands: []Command{
+		{Description: "build", Script: "docker build ."},
+		{Description: "upload env", Script: "cat > secret.env", Sensitive: true},
+	}}
+	var out strings.Builder
+	c := console.NewWithMode(&out, &out, console.ColorNever)
+	c.Verbose = true
+
+	if err := ExecuteWithConsole(context.Background(), plan, &recordingRunner{}, c); err != nil {
+		t.Fatalf("ExecuteWithConsole returned error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "run: docker build .") || !strings.Contains(got, "run: <sensitive command redacted>") {
+		t.Fatalf("verbose output missing command details:\n%s", got)
+	}
+	if strings.Contains(got, "cat > secret.env") {
+		t.Fatalf("verbose output leaked sensitive command:\n%s", got)
+	}
+}
+
+func TestExecutePrintsConciseFailure(t *testing.T) {
+	plan := Plan{Commands: []Command{{Description: "wait for web health check"}}}
+	var out strings.Builder
+	err := Execute(context.Background(), plan, &recordingRunner{err: errors.New("exit status 1")}, &out)
+	if err == nil {
+		t.Fatal("expected Execute to return runner error")
+	}
+	if got := out.String(); !strings.Contains(got, "✗ wait for web health check: exit status 1") {
+		t.Fatalf("failure output was not concise and actionable:\n%s", got)
+	}
+}
+
+func TestExecuteDoesNotLeakSensitiveSteps(t *testing.T) {
 	runner := &recordingRunner{}
 	plan := Plan{Commands: []Command{{
 		Description: "upload env",
@@ -39,6 +113,15 @@ func TestPlanPrintRedactsSensitiveSteps(t *testing.T) {
 	plan.Print(&out)
 	if strings.Contains(out.String(), "DATABASE_URL=secret") || strings.Contains(out.String(), "cat > secret.env") {
 		t.Fatalf("sensitive details leaked: %s", out.String())
+	}
+}
+
+func TestPlanPrintStylesDryRunHeadingWhenColorIsForced(t *testing.T) {
+	t.Setenv("SLIPWAY_COLOR", "always")
+	var out strings.Builder
+	Plan{Title: "Deploy demo/production"}.Print(&out)
+	if got := out.String(); !strings.Contains(got, "\x1b[1;33mDRY RUN\x1b[0m") {
+		t.Fatalf("dry-run heading was not styled yellow: %q", got)
 	}
 }
 

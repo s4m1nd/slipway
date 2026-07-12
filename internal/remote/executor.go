@@ -4,6 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/s4m1nd/slipway/internal/console"
 )
 
 type ExecutorRunner interface {
@@ -15,23 +20,41 @@ type OutputRunner interface {
 }
 
 func Execute(ctx context.Context, plan Plan, runner ExecutorRunner, stdout io.Writer) error {
-	return ExecuteWithSucceeded(ctx, plan, runner, stdout, map[string]bool{})
+	c := console.New(stdout, stdout)
+	return ExecuteWithConsole(ctx, plan, runner, c)
 }
 
 func ExecuteWithSucceeded(ctx context.Context, plan Plan, runner ExecutorRunner, stdout io.Writer, succeeded map[string]bool) error {
-	_, err := ExecuteWithSucceededFrom(ctx, plan, runner, stdout, succeeded, 1)
+	c := console.New(stdout, stdout)
+	_, err := ExecuteWithSucceededFromConsole(ctx, plan, runner, c, succeeded, 1, len(plan.Commands))
 	return err
 }
 
 func ExecuteWithSucceededFrom(ctx context.Context, plan Plan, runner ExecutorRunner, stdout io.Writer, succeeded map[string]bool, startIndex int) (int, error) {
+	c := console.New(stdout, stdout)
+	return ExecuteWithSucceededFromConsole(ctx, plan, runner, c, succeeded, startIndex, startIndex+len(plan.Commands)-1)
+}
+
+func ExecuteWithConsole(ctx context.Context, plan Plan, runner ExecutorRunner, c console.Console) error {
+	_, err := ExecuteWithSucceededFromConsole(ctx, plan, runner, c, map[string]bool{}, 1, len(plan.Commands))
+	return err
+}
+
+func ExecuteWithSucceededFromConsole(ctx context.Context, plan Plan, runner ExecutorRunner, c console.Console, succeeded map[string]bool, startIndex int, totalSteps int) (int, error) {
 	if succeeded == nil {
 		succeeded = map[string]bool{}
 	}
 	if startIndex < 1 {
 		startIndex = 1
 	}
+	if totalSteps < startIndex+len(plan.Commands)-1 {
+		totalSteps = startIndex + len(plan.Commands) - 1
+	}
 	if plan.Title != "" {
-		fmt.Fprintln(stdout, plan.Title)
+		c.Title(plan.Title)
+	}
+	if plan.Subtitle != "" {
+		c.Subtitle("", plan.Subtitle)
 	}
 	var firstErr error
 	nextIndex := startIndex
@@ -42,26 +65,24 @@ func ExecuteWithSucceededFrom(ctx context.Context, plan Plan, runner ExecutorRun
 		if command.RunIfSucceeded != "" && !succeeded[command.RunIfSucceeded] {
 			continue
 		}
-		fmt.Fprintf(stdout, "%d. %s\n", nextIndex, command.Description)
+		c.Step(nextIndex, totalSteps, command.Description)
 		nextIndex++
 		if command.Host != "" {
+			target := command.Host
 			if command.SSHUser != "" {
-				fmt.Fprintf(stdout, "   host: %s@%s\n", command.SSHUser, command.Host)
-			} else {
-				fmt.Fprintf(stdout, "   host: %s\n", command.Host)
+				target = command.SSHUser + "@" + command.Host
 			}
-			if command.SSHPort != 0 {
-				fmt.Fprintf(stdout, "   port: %d\n", command.SSHPort)
+			if command.SSHPort != 0 && command.SSHPort != 22 {
+				target += ":" + strconv.Itoa(command.SSHPort)
 			}
+			c.Target(target)
 		} else {
-			fmt.Fprintln(stdout, "   local: true")
+			c.Target("local")
 		}
-		if command.Sensitive {
-			fmt.Fprintln(stdout, "   run: <sensitive command redacted>")
-		} else if command.Script != "" {
-			fmt.Fprintf(stdout, "   run: %s\n", command.Script)
-		}
+		c.Command(command.Script, command.Sensitive)
+		started := time.Now()
 		if err := runner.Run(ctx, command); err != nil {
+			c.Failure(fmt.Sprintf("%s: %v", command.Description, err))
 			if firstErr == nil {
 				firstErr = err
 			} else {
@@ -72,6 +93,26 @@ func ExecuteWithSucceededFrom(ctx context.Context, plan Plan, runner ExecutorRun
 		if command.ID != "" {
 			succeeded[command.ID] = true
 		}
+		c.SuccessTimed(successMessage(command.Description), time.Since(started))
 	}
 	return nextIndex, firstErr
+}
+
+func successMessage(description string) string {
+	switch {
+	case strings.HasPrefix(description, "start inactive "), strings.HasPrefix(description, "start previous "):
+		return "container started"
+	case strings.HasPrefix(description, "wait for ") && strings.HasSuffix(description, " health check"):
+		return "healthy"
+	case description == "switch Caddy routes":
+		return "traffic switched"
+	case description == "sync Caddy routes":
+		return "routes synced"
+	case strings.HasPrefix(description, "record active "):
+		return "state recorded"
+	case strings.HasPrefix(description, "rollback state for "):
+		return "rollback state recorded"
+	default:
+		return "complete"
+	}
 }

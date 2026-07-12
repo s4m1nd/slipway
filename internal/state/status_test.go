@@ -3,6 +3,8 @@ package state
 import (
 	"strings"
 	"testing"
+
+	"github.com/s4m1nd/slipway/internal/console"
 )
 
 func TestParseServiceStatusWithActiveAndPreviousState(t *testing.T) {
@@ -188,6 +190,28 @@ func TestRenderReportIncludesServiceNamesAndHostIdentifiers(t *testing.T) {
 	for _, want := range []string{"demo/production status", "web", "app-1/root@203.0.113.10", "green 20260630T120000Z", "blue 20260629T120000Z", "running"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("report missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderReportPadsCellsBeforeApplyingColor(t *testing.T) {
+	statuses := []ServiceStatus{{
+		Service:     "web",
+		Host:        "203.0.113.10",
+		StateExists: true,
+		Active:      Release{Color: "green", Release: "release-a"},
+		Previous:    Release{Color: "blue", Release: "release-b"},
+		Blue:        Container{Exists: true, Running: false},
+		Green:       Container{Exists: true, Running: true},
+	}}
+	var out strings.Builder
+	c := console.NewWithMode(&out, &out, console.ColorAlways)
+
+	RenderReportWithConsole(c, "demo", "production", statuses)
+	got := out.String()
+	for _, want := range []string{"\x1b[32mgreen release-a", "\x1b[34mblue release-b", "\x1b[33mstopped", "\x1b[32mrunning"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("colored report missing %q:\n%s", want, got)
 		}
 	}
 }

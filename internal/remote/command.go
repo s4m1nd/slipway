@@ -2,6 +2,14 @@ package remote
 
 import "strings"
 
+type OutputMode string
+
+const (
+	OutputStream         OutputMode = ""
+	OutputQuietOnSuccess OutputMode = "quiet-on-success"
+	OutputCaddySummary   OutputMode = "caddy-summary"
+)
+
 // Command is a local or host command. The planner creates Commands; transport
 // implementations execute them.
 type Command struct {
@@ -12,6 +20,7 @@ type Command struct {
 	Script      string
 	Stdin       string
 	Sensitive   bool
+	OutputMode  OutputMode
 
 	// ID names a successfully completed command so later Always commands can
 	// be tied to it. It is intentionally not rendered in plans.

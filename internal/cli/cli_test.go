@@ -47,7 +47,7 @@ func TestDeployDryRunPrintsPlan(t *testing.T) {
 	if code := Execute([]string{"deploy", "-c", path, "--env", "production", "--dry-run"}, &out, &errOut); code != 0 {
 		t.Fatalf("deploy code=%d stderr=%s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "Deploy demo/production release") || !strings.Contains(out.String(), "switch Caddy route") {
+	if !strings.Contains(out.String(), "Deploy demo/production\nRelease ") || !strings.Contains(out.String(), "switch Caddy route") {
 		t.Fatalf("unexpected deploy output: %s", out.String())
 	}
 	if got := strings.Count(out.String(), "switch Caddy routes"); got != 1 {
@@ -244,6 +244,39 @@ func TestExecuteRollbackInspectsReadinessWhileLockIsHeld(t *testing.T) {
 	if !(lastAcquire < firstInspect && firstInspect < firstMutation && firstMutation < firstRelease) {
 		t.Fatalf("rollback should inspect readiness inside the lock before mutation:\n%s", events)
 	}
+	for _, want := range []string{"Rollback complete", "active:", "blue", "release: 20260630T120000Z", "elapsed:"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("rollback summary missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestExecuteDeployPrintsFinalStatusSummary(t *testing.T) {
+	cfg, err := config.LoadBytes([]byte(exampleConfig))
+	if err != nil {
+		t.Fatalf("LoadBytes returned error: %v", err)
+	}
+	p, err := planner.New(cfg, "production")
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	plan := remote.Plan{
+		Title:    "Deploy demo/production",
+		Subtitle: "Release planned-release",
+		Commands: []remote.Command{{Description: "wait for web health check"}},
+	}
+	runner := &recordingRollbackRunner{}
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+
+	if code := executeDeployWithRunner(p, plan, runner, false, &out, &errOut); code != 0 {
+		t.Fatalf("executeDeploy code=%d stderr=%s stdout=%s", code, errOut.String(), out.String())
+	}
+	for _, want := range []string{"Deploy demo/production", "Release planned-release", "✓ healthy", "Deployment complete", "active:", "green", "release: 20260701T120000Z", "elapsed:"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("deploy summary missing %q:\n%s", want, out.String())
+		}
+	}
 }
 
 func TestExecuteRollbackPrintsContinuousCommandNumbers(t *testing.T) {
@@ -307,11 +340,13 @@ func TestRollbackEnvFlagBehaviorMatchesOtherCommands(t *testing.T) {
 func commandNumbers(output string) []int {
 	var numbers []int
 	for _, line := range strings.Split(output, "\n") {
-		dot := strings.IndexByte(line, '.')
-		if dot <= 0 {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
 			continue
 		}
-		n, err := strconv.Atoi(line[:dot])
+		label := strings.TrimSuffix(fields[0], ".")
+		label, _, _ = strings.Cut(label, "/")
+		n, err := strconv.Atoi(label)
 		if err != nil {
 			continue
 		}
@@ -786,6 +821,9 @@ exit 0
 	if code != 0 {
 		t.Fatalf("deploy code=%d stderr=%s stdout=%s", code, errOut.String(), out.String())
 	}
+	if got := out.String(); !strings.Contains(got, "1/") || !strings.Contains(got, "✓ complete") || strings.Contains(got, "run: docker") {
+		t.Fatalf("normal deploy output should be concise:\n%s", got)
+	}
 	requested := strings.Split(readTestFile(t, requestedPath), ",")
 	if stringSliceContains(requested, "HCLOUD_TOKEN") {
 		t.Fatalf("deploy requested HCLOUD_TOKEN: %v", requested)
@@ -793,6 +831,22 @@ exit 0
 	for _, want := range []string{"REGISTRY_PASSWORD", "DATABASE_URL", "REDIS_URL"} {
 		if !stringSliceContains(requested, want) {
 			t.Fatalf("deploy requested secrets %v, missing %s", requested, want)
+		}
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code = Execute([]string{"deploy", "-c", path, "--env", "production", "--verbose"}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("verbose deploy code=%d stderr=%s stdout=%s", code, errOut.String(), out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "run: docker build") || !strings.Contains(got, "run: <sensitive command redacted>") {
+		t.Fatalf("verbose deploy output missing safe command details:\n%s", got)
+	}
+	for _, secret := range []string{"registry-secret", "postgres://example", "redis://example"} {
+		if strings.Contains(got, secret) || strings.Contains(errOut.String(), secret) {
+			t.Fatalf("verbose deploy output leaked secret %q", secret)
 		}
 	}
 }

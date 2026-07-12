@@ -10,10 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/s4m1nd/slipway/internal/config"
+	"github.com/s4m1nd/slipway/internal/console"
 	"github.com/s4m1nd/slipway/internal/planner"
 	"github.com/s4m1nd/slipway/internal/remote"
 	"github.com/s4m1nd/slipway/internal/secrets"
@@ -140,12 +142,12 @@ func printUsage(w io.Writer) {
 Usage:
   slipway init [-c slipway.yml] [--force]
   slipway validate -c slipway.yml
-  slipway provision -c slipway.yml --env production [--dry-run]
-  slipway deploy -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
-  slipway rollback -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
+  slipway provision -c slipway.yml --env production [--dry-run] [--verbose]
+  slipway deploy -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
+  slipway rollback -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
   slipway status -c slipway.yml --env production [--dry-run]
-  slipway sync-proxy -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
-  slipway cleanup -c slipway.yml --env production [--dry-run] [--lock-timeout 30m]
+  slipway sync-proxy -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
+  slipway cleanup -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
   slipway logs -c slipway.yml --env production --service web [--host app-1] [--color active] [--tail 100] [--follow] [--dry-run]
   slipway secrets exec -c slipway.yml --secret NAME [--secret NAME ...] [--dry-run] -- command [args...]
   slipway version`)
@@ -234,7 +236,7 @@ func runProvision(args []string, stdout io.Writer, stderr io.Writer) int {
 		plan.Print(stdout)
 		return 0
 	}
-	return executePlan(plan, stdout, stderr)
+	return executePlan(plan, options.Verbose, stdout, stderr)
 }
 
 func runDeploy(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -265,7 +267,7 @@ func runDeploy(args []string, stdout io.Writer, stderr io.Writer) int {
 		plan.Print(stdout)
 		return 0
 	}
-	return executePlan(plan, stdout, stderr)
+	return executeDeploy(p, plan, options.Verbose, stdout, stderr)
 }
 
 func runSecrets(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -414,8 +416,8 @@ func runRollback(args []string, stdout io.Writer, stderr io.Writer) int {
 		p.WithDeployLock(p.Rollback(), "rollback", options.LockTimeout).Print(stdout)
 		return 0
 	}
-	runner := ssh.Runner{Stdout: stdout, Stderr: stderr}
-	return executeRollback(p, options.LockTimeout, runner, stdout, stderr)
+	runner := ssh.Runner{Stdout: stdout, Stderr: stderr, Verbose: options.Verbose, OutputIndent: "        │ "}
+	return executeRollbackWithOptions(p, options.LockTimeout, runner, options.Verbose, stdout, stderr)
 }
 
 func runCleanup(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -428,7 +430,7 @@ func runCleanup(args []string, stdout io.Writer, stderr io.Writer) int {
 		plan.Print(stdout)
 		return 0
 	}
-	return executePlan(plan, stdout, stderr)
+	return executePlan(plan, options.Verbose, stdout, stderr)
 }
 
 func runSyncProxy(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -441,7 +443,7 @@ func runSyncProxy(args []string, stdout io.Writer, stderr io.Writer) int {
 		plan.Print(stdout)
 		return 0
 	}
-	return executePlan(plan, stdout, stderr)
+	return executePlan(plan, options.Verbose, stdout, stderr)
 }
 
 func runLogs(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -499,6 +501,7 @@ func runLogs(args []string, stdout io.Writer, stderr io.Writer) int {
 
 type plannerOptions struct {
 	DryRun      bool
+	Verbose     bool
 	LockTimeout time.Duration
 }
 
@@ -508,6 +511,10 @@ func loadPlannerFromFlags(command string, args []string, stderr io.Writer, inclu
 	configPath := fs.String("c", "slipway.yml", "config path")
 	envName := fs.String("env", "", "environment name")
 	dryRun := fs.Bool("dry-run", false, "print commands without running them")
+	verbose := false
+	if command != "status" {
+		fs.BoolVar(&verbose, "verbose", false, "show generated non-sensitive commands while running")
+	}
 	var lockTimeout *time.Duration
 	if includeLock {
 		lockTimeout = fs.Duration("lock-timeout", 30*time.Minute, "stale deploy lock timeout")
@@ -533,19 +540,51 @@ func loadPlannerFromFlags(command string, args []string, stderr io.Writer, inclu
 		fmt.Fprintf(stderr, "invalid config:\n%v\n", err)
 		return nil, plannerOptions{}, 1
 	}
-	options := plannerOptions{DryRun: *dryRun}
+	options := plannerOptions{DryRun: *dryRun, Verbose: verbose}
 	if includeLock {
 		options.LockTimeout = *lockTimeout
 	}
 	return p, options, 0
 }
 
-func executePlan(plan remote.Plan, stdout io.Writer, stderr io.Writer) int {
-	runner := ssh.Runner{Stdout: stdout, Stderr: stderr}
-	if err := remote.Execute(context.Background(), plan, runner, stdout); err != nil {
+func executePlan(plan remote.Plan, verbose bool, stdout io.Writer, stderr io.Writer) int {
+	runner := ssh.Runner{Stdout: stdout, Stderr: stderr, Verbose: verbose, OutputIndent: "        │ "}
+	c := console.New(stdout, stderr)
+	c.Verbose = verbose
+	if err := remote.ExecuteWithConsole(context.Background(), plan, runner, c); err != nil {
 		fmt.Fprintf(stderr, "execute plan: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+func executeDeploy(p *planner.Planner, plan remote.Plan, verbose bool, stdout io.Writer, stderr io.Writer) int {
+	runner := ssh.Runner{Stdout: stdout, Stderr: stderr, Verbose: verbose, OutputIndent: "        │ "}
+	return executeDeployWithRunner(p, plan, runner, verbose, stdout, stderr)
+}
+
+func executeDeployWithRunner(p *planner.Planner, plan remote.Plan, runner rollbackRunner, verbose bool, stdout io.Writer, stderr io.Writer) int {
+	c := console.New(stdout, stderr)
+	c.Verbose = verbose
+	started := time.Now()
+	if err := remote.ExecuteWithConsole(context.Background(), plan, runner, c); err != nil {
+		fmt.Fprintf(stderr, "execute deploy: %v\n", err)
+		return 1
+	}
+
+	active := ""
+	releaseID := strings.TrimPrefix(plan.Subtitle, "Release ")
+	styles := []console.Style(nil)
+	if statuses, ok := inspectStatuses(p, runner, stderr); ok {
+		active, releaseID, styles = summarizeStatuses(statuses, false)
+	} else {
+		c.Warning("deployment completed, but final status could not be read")
+	}
+	c.Completion("Deployment complete",
+		console.Field{Label: "active", Value: active, Styles: styles},
+		console.Field{Label: "release", Value: releaseID},
+		console.Field{Label: "elapsed", Value: console.FormatElapsed(time.Since(started))},
+	)
 	return 0
 }
 
@@ -555,56 +594,70 @@ type rollbackRunner interface {
 }
 
 func executeRollback(p *planner.Planner, lockTimeout time.Duration, runner rollbackRunner, stdout io.Writer, stderr io.Writer) int {
+	return executeRollbackWithOptions(p, lockTimeout, runner, false, stdout, stderr)
+}
+
+func executeRollbackWithOptions(p *planner.Planner, lockTimeout time.Duration, runner rollbackRunner, verbose bool, stdout io.Writer, stderr io.Writer) int {
+	started := time.Now()
 	ctx := context.Background()
 	plan := p.Rollback()
 	locks := p.DeployLockCommands(plan.Commands, "rollback", lockTimeout)
+	c := console.New(stdout, stderr)
+	c.Verbose = verbose
+	totalSteps := len(locks.Acquire) + len(plan.Commands) + len(locks.Release)
 	succeeded := map[string]bool{}
 	nextStep := 1
 	if len(locks.Acquire) > 0 {
 		var err error
-		nextStep, err = remote.ExecuteWithSucceededFrom(ctx, remote.Plan{Title: plan.Title, Commands: locks.Acquire}, runner, stdout, succeeded, nextStep)
+		nextStep, err = remote.ExecuteWithSucceededFromConsole(ctx, remote.Plan{Title: plan.Title, Commands: locks.Acquire}, runner, c, succeeded, nextStep, totalSteps)
 		if err != nil {
-			_, err = releaseRollbackLocks(ctx, locks, runner, stdout, succeeded, nextStep, err)
+			_, err = releaseRollbackLocks(ctx, locks, runner, c, succeeded, nextStep, totalSteps, err)
 			fmt.Fprintf(stderr, "execute rollback: %v\n", err)
 			return 1
 		}
 	} else if plan.Title != "" {
-		fmt.Fprintln(stdout, plan.Title)
+		c.Title(plan.Title)
 	}
 
 	statuses, ok := inspectStatuses(p, runner, stderr)
 	if !ok {
-		if _, err := releaseRollbackLocks(ctx, locks, runner, stdout, succeeded, nextStep, nil); err != nil {
+		if _, err := releaseRollbackLocks(ctx, locks, runner, c, succeeded, nextStep, totalSteps, nil); err != nil {
 			fmt.Fprintf(stderr, "release rollback lock: %v\n", err)
 		}
 		return 1
 	}
 	if err := state.ValidateRollbackReady(statuses); err != nil {
 		fmt.Fprintf(stderr, "rollback is not ready:\n%v\n", err)
-		if _, releaseErr := releaseRollbackLocks(ctx, locks, runner, stdout, succeeded, nextStep, nil); releaseErr != nil {
+		if _, releaseErr := releaseRollbackLocks(ctx, locks, runner, c, succeeded, nextStep, totalSteps, nil); releaseErr != nil {
 			fmt.Fprintf(stderr, "release rollback lock: %v\n", releaseErr)
 		}
 		return 1
 	}
 	var err error
-	nextStep, err = remote.ExecuteWithSucceededFrom(ctx, remote.Plan{Commands: plan.Commands}, runner, stdout, succeeded, nextStep)
+	nextStep, err = remote.ExecuteWithSucceededFromConsole(ctx, remote.Plan{Commands: plan.Commands}, runner, c, succeeded, nextStep, totalSteps)
 	if err != nil {
-		_, err = releaseRollbackLocks(ctx, locks, runner, stdout, succeeded, nextStep, err)
+		_, err = releaseRollbackLocks(ctx, locks, runner, c, succeeded, nextStep, totalSteps, err)
 		fmt.Fprintf(stderr, "execute rollback: %v\n", err)
 		return 1
 	}
-	if _, err := releaseRollbackLocks(ctx, locks, runner, stdout, succeeded, nextStep, nil); err != nil {
+	if _, err := releaseRollbackLocks(ctx, locks, runner, c, succeeded, nextStep, totalSteps, nil); err != nil {
 		fmt.Fprintf(stderr, "release rollback lock: %v\n", err)
 		return 1
 	}
+	active, releaseID, styles := summarizeStatuses(statuses, true)
+	c.Completion("Rollback complete",
+		console.Field{Label: "active", Value: active, Styles: styles},
+		console.Field{Label: "release", Value: releaseID},
+		console.Field{Label: "elapsed", Value: console.FormatElapsed(time.Since(started))},
+	)
 	return 0
 }
 
-func releaseRollbackLocks(ctx context.Context, locks planner.DeployLockCommands, runner remote.ExecutorRunner, stdout io.Writer, succeeded map[string]bool, startStep int, prior error) (int, error) {
+func releaseRollbackLocks(ctx context.Context, locks planner.DeployLockCommands, runner remote.ExecutorRunner, c console.Console, succeeded map[string]bool, startStep int, totalSteps int, prior error) (int, error) {
 	if len(locks.Release) == 0 {
 		return startStep, prior
 	}
-	nextStep, err := remote.ExecuteWithSucceededFrom(ctx, remote.Plan{Commands: locks.Release}, runner, stdout, succeeded, startStep)
+	nextStep, err := remote.ExecuteWithSucceededFromConsole(ctx, remote.Plan{Commands: locks.Release}, runner, c, succeeded, startStep, totalSteps)
 	if prior != nil && err != nil {
 		return nextStep, fmt.Errorf("%w; release deploy lock failed: %v", prior, err)
 	}
@@ -645,7 +698,7 @@ func executeStatus(p *planner.Planner, stdout io.Writer, stderr io.Writer) int {
 	if !ok {
 		return 1
 	}
-	state.RenderReport(stdout, p.Config.Project, p.EnvName, statuses)
+	state.RenderReportWithConsole(console.New(stdout, stderr), p.Config.Project, p.EnvName, statuses)
 	return 0
 }
 
@@ -672,6 +725,56 @@ func inspectStatuses(p *planner.Planner, runner remote.OutputRunner, stderr io.W
 		statuses = append(statuses, status)
 	}
 	return statuses, true
+}
+
+func summarizeStatuses(statuses []state.ServiceStatus, previous bool) (string, string, []console.Style) {
+	colors := map[string]bool{}
+	releases := map[string]bool{}
+	assignments := make([]string, 0, len(statuses))
+	for _, status := range statuses {
+		release := status.Active
+		if previous {
+			release = status.Previous
+		}
+		if release.Color != "" {
+			colors[release.Color] = true
+			label := status.Service
+			if status.HostName != "" {
+				label += "@" + status.HostName
+			}
+			assignments = append(assignments, label+"="+release.Color)
+		}
+		if release.Release != "" {
+			releases[release.Release] = true
+		}
+	}
+
+	active := ""
+	styles := []console.Style(nil)
+	if len(colors) == 1 {
+		for color := range colors {
+			active = color
+			switch color {
+			case "blue":
+				styles = []console.Style{console.StyleBlue}
+			case "green":
+				styles = []console.Style{console.StyleGreen}
+			}
+		}
+	} else if len(assignments) > 0 {
+		sort.Strings(assignments)
+		active = strings.Join(assignments, ", ")
+	}
+
+	releaseID := ""
+	if len(releases) == 1 {
+		for release := range releases {
+			releaseID = release
+		}
+	} else if len(releases) > 1 {
+		releaseID = "mixed"
+	}
+	return active, releaseID, styles
 }
 
 func plural(n int) string {

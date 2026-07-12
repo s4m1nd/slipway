@@ -75,11 +75,14 @@ func (d Docker) LoginLocal(registry config.Registry, password string) remote.Com
 		Script:      fmt.Sprintf("docker login %s -u %s --password-stdin", shell(registry.Server), shell(registry.Username)),
 		Stdin:       password,
 		Sensitive:   true,
+		OutputMode:  remote.OutputQuietOnSuccess,
 	}
 }
 
 func (d Docker) LoginRemote(server config.Server, registry config.Registry, password string) remote.Command {
-	return d.sensitiveRemoteCommand(server, "log in to registry on host", fmt.Sprintf("docker login %s -u %s --password-stdin", shell(registry.Server), shell(registry.Username)), password)
+	command := d.sensitiveRemoteCommand(server, "log in to registry on host", fmt.Sprintf("docker login %s -u %s --password-stdin", shell(registry.Server), shell(registry.Username)), password)
+	command.OutputMode = remote.OutputQuietOnSuccess
+	return command
 }
 
 func (d Docker) BuildService(serviceName string, service config.Service, image string) remote.Command {
@@ -101,7 +104,9 @@ func (d Docker) UploadEnv(server config.Server, serviceName string, releaseID st
 }
 
 func (d Docker) StartService(server config.Server, serviceName string, service config.Service, image string, releaseID string) remote.Command {
-	return d.remoteCommand(server, fmt.Sprintf("start inactive %s release", serviceName), d.startServiceScript(serviceName, service, image, releaseID))
+	command := d.remoteCommand(server, fmt.Sprintf("start inactive %s release", serviceName), d.startServiceScript(serviceName, service, image, releaseID))
+	command.OutputMode = remote.OutputQuietOnSuccess
+	return command
 }
 
 func (d Docker) WaitHealthy(server config.Server, serviceName string, service config.Service) remote.Command {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/s4m1nd/slipway/internal/config"
+	"github.com/s4m1nd/slipway/internal/remote"
 )
 
 func TestTargetColorScriptHandlesFormattedStateJSON(t *testing.T) {
@@ -47,6 +48,9 @@ func TestCaddyProvisionIsIdempotentAndDoesNotRemoveRunningContainer(t *testing.T
 
 func TestCaddySwitchUsesSafeCaddyfileUpdatePath(t *testing.T) {
 	command := testCaddy().Switch(testServer(), testSwitchInput())[0]
+	if command.OutputMode != remote.OutputCaddySummary {
+		t.Fatalf("Caddy switch output mode = %q, want summary", command.OutputMode)
+	}
 
 	assertSafeCaddyfileUpdate(t, command.Script)
 	assertOrder(t, command.Script,

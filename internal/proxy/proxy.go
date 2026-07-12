@@ -78,7 +78,9 @@ func (c Caddy) writeRoutes(server config.Server, input SwitchInput, description 
 	}
 
 	script := c.caddyfileUpdateScript(vars, colorReplacements(services), strings.Join(blocks, "\n\n"))
-	return []remote.Command{c.remoteCommand(server, description, script)}
+	command := c.remoteCommand(server, description, script)
+	command.OutputMode = remote.OutputCaddySummary
+	return []remote.Command{command}
 }
 
 func (c Caddy) caddyfileUpdateScript(vars []string, replacements []string, contents string) string {

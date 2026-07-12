@@ -13,6 +13,9 @@ import (
 func TestDeployPlanSwitchesCaddyOncePerProxyHost(t *testing.T) {
 	p := newTestPlanner(t)
 	plan := deployPlan(t, p)
+	if plan.Title != "Deploy demo/production" || !strings.HasPrefix(plan.Subtitle, "Release ") {
+		t.Fatalf("deploy heading = %q / %q", plan.Title, plan.Subtitle)
+	}
 
 	var switches []remote.Command
 	for _, command := range plan.Commands {
