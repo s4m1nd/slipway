@@ -31,6 +31,11 @@ check: fmt-check
 	go run ./cmd/slipway sync-proxy -c slipway.example.yml --env production --dry-run
 	go run ./cmd/slipway cleanup -c slipway.example.yml --env production --dry-run
 	go run ./cmd/slipway logs -c slipway.example.yml --env production --service web --dry-run
+	go run ./cmd/slipway accessory apply -c slipway.example.yml --env production --dry-run
+	go run ./cmd/slipway accessory status -c slipway.example.yml --env production --dry-run
+	go run ./cmd/slipway accessory logs -c slipway.example.yml --env production --name redis --dry-run
+	go run ./cmd/slipway accessory restart -c slipway.example.yml --env production --name redis --dry-run
+	go run ./cmd/slipway accessory exec -c slipway.example.yml --env production --name redis --dry-run -- redis-cli PING
 	scripts/install.sh --dry-run
 
 live-render:

@@ -22,6 +22,12 @@ func TestReadmeDocumentsOperatorRequirementsAndSupportedSecretModes(t *testing.T
 		"`slipway.live.example.yml`",
 		"`examples/terraform/hetzner-single-node`",
 		"`examples/live-nginx`",
+		"## Accessories",
+		"slipway accessory apply",
+		"Application deploys never pull, recreate, restart, or update accessories",
+		"There is deliberately no accessory `destroy` command",
+		"changing the configured image to another major version is refused",
+		"prove that it restores into a disposable database",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README.md missing %q", want)

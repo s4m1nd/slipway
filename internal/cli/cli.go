@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s4m1nd/slipway/internal/accessory"
 	"github.com/s4m1nd/slipway/internal/config"
 	"github.com/s4m1nd/slipway/internal/console"
 	"github.com/s4m1nd/slipway/internal/planner"
@@ -44,6 +45,7 @@ secrets:
     - REGISTRY_PASSWORD
     - DATABASE_URL
     - REDIS_URL
+    - REDIS_PASSWORD
 
 environments:
   production:
@@ -63,6 +65,15 @@ environments:
         - host: app.example.com
           service: web
           tls: true
+    accessories:
+      redis:
+        type: redis
+        image: redis:7-alpine
+        host: app-1
+        secrets:
+          - REDIS_PASSWORD
+        storage:
+          volume: demo-redis-data
     services:
       web:
         image: ghcr.io/example/demo-web
@@ -71,6 +82,7 @@ environments:
           dockerfile: Dockerfile
           platform: linux/amd64
         hosts: [app-1]
+        depends_on: [redis]
         internal_port: 3000
         health_check:
           path: /healthz
@@ -79,9 +91,12 @@ environments:
           retries: 12
         env:
           RACK_ENV: production
+          REDIS_HOST: redis
+          REDIS_PORT: "6379"
         secrets:
           - DATABASE_URL
           - REDIS_URL
+          - REDIS_PASSWORD
       worker:
         image: ghcr.io/example/demo-worker
         build:
@@ -129,6 +144,8 @@ func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runCleanup(args[1:], stdout, stderr)
 	case "secrets":
 		return runSecrets(args[1:], stdout, stderr)
+	case "accessory":
+		return runAccessory(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", cmd)
 		printUsage(stderr)
@@ -149,6 +166,11 @@ Usage:
   slipway sync-proxy -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
   slipway cleanup -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
   slipway logs -c slipway.yml --env production --service web [--host app-1] [--color active] [--tail 100] [--follow] [--dry-run]
+  slipway accessory apply -c slipway.yml --env production [--name <accessory>] [--dry-run] [--verbose] [--lock-timeout 30m]
+  slipway accessory status -c slipway.yml --env production [--name <accessory>] [--dry-run]
+  slipway accessory logs -c slipway.yml --env production --name <accessory> [--tail 100] [--follow] [--dry-run]
+  slipway accessory restart -c slipway.yml --env production --name <accessory> [--dry-run] [--verbose] [--lock-timeout 30m]
+  slipway accessory exec -c slipway.yml --env production --name <accessory> [--dry-run] -- command [args...]
   slipway secrets exec -c slipway.yml --secret NAME [--secret NAME ...] [--dry-run] -- command [args...]
   slipway version`)
 }
@@ -286,6 +308,305 @@ func runSecrets(args []string, stdout io.Writer, stderr io.Writer) int {
 		printSecretsUsage(stderr)
 		return 2
 	}
+}
+
+func runAccessory(args []string, stdout io.Writer, stderr io.Writer) int {
+	if len(args) == 0 {
+		printAccessoryUsage(stdout)
+		return 0
+	}
+	switch args[0] {
+	case "help", "-h", "--help":
+		printAccessoryUsage(stdout)
+		return 0
+	case "apply":
+		return runAccessoryApply(args[1:], stdout, stderr)
+	case "status":
+		return runAccessoryStatus(args[1:], stdout, stderr)
+	case "logs":
+		return runAccessoryLogs(args[1:], stdout, stderr)
+	case "restart":
+		return runAccessoryRestart(args[1:], stdout, stderr)
+	case "exec":
+		return runAccessoryExec(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown accessory command %q\n\n", args[0])
+		printAccessoryUsage(stderr)
+		return 2
+	}
+}
+
+func printAccessoryUsage(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  slipway accessory apply -c slipway.yml --env production [--name <accessory>] [--dry-run] [--verbose] [--lock-timeout 30m]
+  slipway accessory status -c slipway.yml --env production [--name <accessory>] [--dry-run]
+  slipway accessory logs -c slipway.yml --env production --name <accessory> [--tail 100] [--follow] [--dry-run]
+  slipway accessory restart -c slipway.yml --env production --name <accessory> [--dry-run] [--verbose] [--lock-timeout 30m]
+  slipway accessory exec -c slipway.yml --env production --name <accessory> [--dry-run] -- command [args...]`)
+}
+
+func runAccessoryApply(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("accessory apply", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("c", "slipway.yml", "config path")
+	envName := fs.String("env", "", "environment name")
+	name := fs.String("name", "", "optional accessory name")
+	dryRun := fs.Bool("dry-run", false, "print commands without running them")
+	verbose := fs.Bool("verbose", false, "show generated non-sensitive commands while running")
+	lockTimeout := fs.Duration("lock-timeout", 30*time.Minute, "stale deploy lock timeout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *lockTimeout <= 0 {
+		fmt.Fprintln(stderr, "--lock-timeout must be greater than 0")
+		return 2
+	}
+	cfg, targets, manager, exitCode := loadAccessoryTargets(*configPath, *envName, *name, false, stderr)
+	if exitCode != 0 {
+		return exitCode
+	}
+	secretNames := accessorySecretNames(targets)
+	resolved := map[string]string{}
+	if *dryRun {
+		for _, secretName := range secretNames {
+			resolved[secretName] = "<redacted>"
+		}
+	} else if len(secretNames) > 0 {
+		resolver, err := secrets.NewResolver(cfg.Secrets)
+		if err != nil {
+			fmt.Fprintf(stderr, "create secret resolver: %v\n", err)
+			return 1
+		}
+		resolved, err = resolver.Resolve(context.Background(), secretNames)
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve accessory secrets: %v\n", err)
+			return 1
+		}
+	}
+	var commands []remote.Command
+	for _, target := range targets {
+		planned, err := manager.Apply(target.Server, target.Name, target.Config, resolved)
+		if err != nil {
+			fmt.Fprintf(stderr, "plan accessory %s: %v\n", target.Name, err)
+			return 1
+		}
+		commands = append(commands, planned...)
+	}
+	plan := remote.Plan{Title: fmt.Sprintf("Apply accessories %s/%s", cfg.Project, *envName), Commands: commands}
+	p, err := planner.New(cfg, *envName)
+	if err != nil {
+		fmt.Fprintf(stderr, "plan accessory lock: %v\n", err)
+		return 1
+	}
+	plan = p.WithDeployLock(plan, "accessory apply", *lockTimeout)
+	if *dryRun {
+		plan.Print(stdout)
+		return 0
+	}
+	return executePlan(plan, *verbose, stdout, stderr)
+}
+
+func runAccessoryStatus(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("accessory status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("c", "slipway.yml", "config path")
+	envName := fs.String("env", "", "environment name")
+	name := fs.String("name", "", "optional accessory name")
+	dryRun := fs.Bool("dry-run", false, "print commands without running them")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	cfg, targets, manager, exitCode := loadAccessoryTargets(*configPath, *envName, *name, false, stderr)
+	if exitCode != 0 {
+		return exitCode
+	}
+	commands := make([]remote.Command, 0, len(targets))
+	for _, target := range targets {
+		commands = append(commands, manager.Inspect(target.Server, target.Name, target.Config))
+	}
+	if *dryRun {
+		remote.Plan{Title: fmt.Sprintf("Accessory status %s/%s", cfg.Project, *envName), Commands: commands}.Print(stdout)
+		return 0
+	}
+	runner := ssh.Runner{Stdout: stdout, Stderr: stderr}
+	statuses := make([]accessory.Status, 0, len(targets))
+	for i, target := range targets {
+		output, err := runner.Output(context.Background(), commands[i])
+		if err != nil {
+			fmt.Fprintf(stderr, "inspect accessory %s: %v\n", target.Name, err)
+			return 1
+		}
+		status, err := accessory.ParseStatus(target, output)
+		if err != nil {
+			fmt.Fprintf(stderr, "parse accessory %s status: %v\n", target.Name, err)
+			return 1
+		}
+		statuses = append(statuses, status)
+	}
+	accessory.RenderStatuses(stdout, cfg.Project, *envName, statuses)
+	return 0
+}
+
+func runAccessoryLogs(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("accessory logs", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("c", "slipway.yml", "config path")
+	envName := fs.String("env", "", "environment name")
+	name := fs.String("name", "", "accessory name")
+	tail := fs.Int("tail", 100, "number of log lines to show")
+	follow := fs.Bool("follow", false, "follow log output")
+	dryRun := fs.Bool("dry-run", false, "print commands without running them")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *tail < 0 {
+		fmt.Fprintln(stderr, "--tail must be >= 0")
+		return 2
+	}
+	cfg, targets, manager, exitCode := loadAccessoryTargets(*configPath, *envName, *name, true, stderr)
+	if exitCode != 0 {
+		return exitCode
+	}
+	target := targets[0]
+	command := manager.Logs(target.Server, target.Name, target.Config, accessory.LogsOptions{Tail: *tail, Follow: *follow})
+	if *dryRun {
+		remote.Plan{Title: fmt.Sprintf("Logs %s/%s accessory %s", cfg.Project, *envName, target.Name), Commands: []remote.Command{command}}.Print(stdout)
+		return 0
+	}
+	runner := ssh.Runner{Stdout: stdout, Stderr: stderr}
+	if err := runner.Run(context.Background(), command); err != nil {
+		fmt.Fprintf(stderr, "stream logs for accessory %s: %v\n", target.Name, err)
+		return 1
+	}
+	return 0
+}
+
+func runAccessoryRestart(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("accessory restart", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("c", "slipway.yml", "config path")
+	envName := fs.String("env", "", "environment name")
+	name := fs.String("name", "", "accessory name")
+	dryRun := fs.Bool("dry-run", false, "print commands without running them")
+	verbose := fs.Bool("verbose", false, "show generated non-sensitive commands while running")
+	lockTimeout := fs.Duration("lock-timeout", 30*time.Minute, "stale deploy lock timeout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *lockTimeout <= 0 {
+		fmt.Fprintln(stderr, "--lock-timeout must be greater than 0")
+		return 2
+	}
+	cfg, targets, manager, exitCode := loadAccessoryTargets(*configPath, *envName, *name, true, stderr)
+	if exitCode != 0 {
+		return exitCode
+	}
+	target := targets[0]
+	plan := remote.Plan{Title: fmt.Sprintf("Restart %s/%s accessory %s", cfg.Project, *envName, target.Name), Commands: manager.Restart(target.Server, target.Name, target.Config)}
+	p, err := planner.New(cfg, *envName)
+	if err != nil {
+		fmt.Fprintf(stderr, "plan accessory lock: %v\n", err)
+		return 1
+	}
+	plan = p.WithDeployLock(plan, "accessory restart", *lockTimeout)
+	if *dryRun {
+		plan.Print(stdout)
+		return 0
+	}
+	return executePlan(plan, *verbose, stdout, stderr)
+}
+
+func runAccessoryExec(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("accessory exec", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("c", "slipway.yml", "config path")
+	envName := fs.String("env", "", "environment name")
+	name := fs.String("name", "", "accessory name")
+	dryRun := fs.Bool("dry-run", false, "print command without running it")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(stderr, "accessory exec requires a command after --")
+		return 2
+	}
+	cfg, targets, manager, exitCode := loadAccessoryTargets(*configPath, *envName, *name, true, stderr)
+	if exitCode != 0 {
+		return exitCode
+	}
+	target := targets[0]
+	command, err := manager.Exec(target.Server, target.Name, target.Config, fs.Args())
+	if err != nil {
+		fmt.Fprintf(stderr, "accessory exec: %v\n", err)
+		return 1
+	}
+	if *dryRun {
+		remote.Plan{Title: fmt.Sprintf("Exec %s/%s accessory %s", cfg.Project, *envName, target.Name), Commands: []remote.Command{command}}.Print(stdout)
+		return 0
+	}
+	runner := ssh.Runner{Stdin: os.Stdin, Stdout: stdout, Stderr: stderr}
+	if err := runner.Run(context.Background(), command); err != nil {
+		fmt.Fprintf(stderr, "exec in accessory %s: %v\n", target.Name, err)
+		return 1
+	}
+	return 0
+}
+
+func loadAccessoryTargets(configPath string, envName string, name string, requireName bool, stderr io.Writer) (config.Config, []accessory.Target, accessory.Manager, int) {
+	if strings.TrimSpace(envName) == "" {
+		fmt.Fprintln(stderr, "--env is required")
+		return config.Config{}, nil, nil, 2
+	}
+	if requireName && strings.TrimSpace(name) == "" {
+		fmt.Fprintln(stderr, "--name is required")
+		return config.Config{}, nil, nil, 2
+	}
+	cfg, err := config.LoadFile(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load config: %v\n", err)
+		return config.Config{}, nil, nil, 1
+	}
+	if err := config.ValidateEnv(cfg, envName); err != nil {
+		fmt.Fprintf(stderr, "invalid config:\n%v\n", err)
+		return config.Config{}, nil, nil, 1
+	}
+	env := cfg.Environments[envName]
+	manager := accessory.NewDocker(cfg.Project, envName, cfg.Defaults.Root)
+	selected := strings.TrimSpace(name)
+	if selected != "" {
+		configured, ok := env.Accessories[selected]
+		if !ok {
+			fmt.Fprintf(stderr, "accessory %q was not found\n", selected)
+			return config.Config{}, nil, nil, 1
+		}
+		return cfg, []accessory.Target{{HostName: configured.Host, Server: env.Servers[configured.Host], Name: selected, Config: configured}}, manager, 0
+	}
+	names := make([]string, 0, len(env.Accessories))
+	for accessoryName := range env.Accessories {
+		names = append(names, accessoryName)
+	}
+	sort.Strings(names)
+	targets := make([]accessory.Target, 0, len(names))
+	for _, accessoryName := range names {
+		configured := env.Accessories[accessoryName]
+		targets = append(targets, accessory.Target{HostName: configured.Host, Server: env.Servers[configured.Host], Name: accessoryName, Config: configured})
+	}
+	return cfg, targets, manager, 0
+}
+
+func accessorySecretNames(targets []accessory.Target) []string {
+	seen := map[string]bool{}
+	for _, target := range targets {
+		for _, name := range target.Config.Secrets {
+			seen[name] = true
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func printSecretsUsage(w io.Writer) {

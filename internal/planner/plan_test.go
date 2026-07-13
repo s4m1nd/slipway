@@ -88,6 +88,68 @@ func TestDeployPlanOrdersBlueGreenPhases(t *testing.T) {
 	}
 }
 
+func TestDeployVerifiesAccessoryDependenciesWithoutMutatingThem(t *testing.T) {
+	cfg, err := config.LoadBytes([]byte(plannerConfigWithRedis()))
+	if err != nil {
+		t.Fatalf("LoadBytes returned error: %v", err)
+	}
+	p, err := New(cfg, "production")
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	p.WithSecrets(map[string]string{
+		"REGISTRY_PASSWORD": "registry-password-value",
+		"DATABASE_URL":      "postgres://secret-value",
+		"REDIS_URL":         "redis://secret-value",
+		"REDIS_PASSWORD":    "redis-password-value",
+	})
+	plan := deployPlan(t, p)
+	verify := firstCommandIndex(plan.Commands, descriptionContains("verify accessory redis"))
+	firstBuild := firstCommandIndex(plan.Commands, descriptionContains("build image"))
+	if verify == -1 || firstBuild == -1 || verify >= firstBuild {
+		t.Fatalf("accessory verification must precede builds; descriptions=%v", commandDescriptions(plan.Commands))
+	}
+	verifyCommand := plan.Commands[verify]
+	if verifyCommand.Host != "203.0.113.10" || !strings.Contains(verifyCommand.Script, "demo_production_redis") {
+		t.Fatalf("verify command = %#v", verifyCommand)
+	}
+	for _, forbidden := range []string{"docker pull", "docker run", "docker rm", "docker volume"} {
+		if strings.Contains(verifyCommand.Script, forbidden) {
+			t.Fatalf("deploy verification mutates accessory with %q:\n%s", forbidden, verifyCommand.Script)
+		}
+	}
+	cleanup := p.Cleanup()
+	for _, command := range cleanup.Commands {
+		if strings.Contains(command.Script, "redis-data") || strings.Contains(command.Script, "demo_production_redis") {
+			t.Fatalf("cleanup touches accessory data: %s", command.Script)
+		}
+	}
+}
+
+func TestDeployLockIsAcquiredBeforeAccessoryVerification(t *testing.T) {
+	cfg, err := config.LoadBytes([]byte(plannerConfigWithRedis()))
+	if err != nil {
+		t.Fatalf("LoadBytes returned error: %v", err)
+	}
+	p, err := New(cfg, "production")
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	p.WithSecrets(map[string]string{
+		"REGISTRY_PASSWORD": "registry-password-value",
+		"DATABASE_URL":      "postgres://secret-value",
+		"REDIS_URL":         "redis://secret-value",
+		"REDIS_PASSWORD":    "redis-password-value",
+	})
+	plan := p.WithDeployLock(deployPlan(t, p), "deploy", 30*time.Minute)
+	lastAcquire := lastCommandIndex(plan.Commands, descriptionContains("acquire deploy lock"))
+	verify := firstCommandIndex(plan.Commands, descriptionContains("verify accessory redis"))
+	firstBuild := firstCommandIndex(plan.Commands, descriptionContains("build image"))
+	if lastAcquire == -1 || verify == -1 || firstBuild == -1 || !(lastAcquire < verify && verify < firstBuild) {
+		t.Fatalf("expected lock, dependency verification, then build; descriptions=%v", commandDescriptions(plan.Commands))
+	}
+}
+
 func TestWithDeployLockWrapsMutatingPlan(t *testing.T) {
 	p := newTestPlanner(t)
 	plan := p.WithDeployLock(deployPlan(t, p), "deploy", 30*time.Minute)
@@ -791,3 +853,20 @@ environments:
         secrets:
           - DATABASE_URL
 `
+
+func plannerConfigWithRedis() string {
+	input := strings.Replace(plannerConfigYAML, "    - REDIS_URL\n", "    - REDIS_URL\n    - REDIS_PASSWORD\n", 1)
+	input = strings.Replace(input, "    services:\n", `    accessories:
+      redis:
+        type: redis
+        image: redis:7-alpine
+        host: app-1
+        secrets:
+          - REDIS_PASSWORD
+        storage:
+          volume: redis-data
+    services:
+`, 1)
+	input = strings.Replace(input, "        hosts: [app-1]\n", "        hosts: [app-1]\n        depends_on: [redis]\n", 1)
+	return strings.Replace(input, "          - REDIS_URL\n", "          - REDIS_URL\n          - REDIS_PASSWORD\n", 1)
+}

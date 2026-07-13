@@ -350,7 +350,6 @@ func TestLoadBytesRejectsStaleSchemaFields(t *testing.T) {
 		"roles":          strings.Replace(validConfigYAML, "hosts: [app-1]", "roles: [web]", 1),
 		"variables":      strings.Replace(validConfigYAML, "names:", "variables:", 1),
 		"command":        strings.Replace(validConfigYAML, "hosts: [app-1]", "command: ./server\n        hosts: [app-1]", 1),
-		"accessories":    validConfigYAML + "    accessories:\n      redis:\n        image: redis:7-alpine\n",
 	}
 	for name, input := range staleInputs {
 		t.Run(name, func(t *testing.T) {
@@ -542,6 +541,210 @@ func TestValidateRejectsDuplicateServiceEnvAndSecretName(t *testing.T) {
 	if !strings.Contains(err.Error(), "DATABASE_URL") {
 		t.Fatalf("expected duplicate name in error, got: %v", err)
 	}
+}
+
+func TestLoadBytesAcceptsRedisAccessoryAndDependency(t *testing.T) {
+	input := configWithRedisAccessory(validConfigYAML)
+	cfg, err := LoadBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("LoadBytes returned error: %v", err)
+	}
+	redis := cfg.Environments["production"].Accessories["redis"]
+	if redis.Type != "redis" || redis.Image != "redis:7-alpine" || redis.Host != "app-1" {
+		t.Fatalf("redis accessory = %#v", redis)
+	}
+	if redis.Storage.Volume != "redis-data" {
+		t.Fatalf("redis volume = %q", redis.Storage.Volume)
+	}
+	if got := cfg.Environments["production"].Services["web"].DependsOn; len(got) != 1 || got[0] != "redis" {
+		t.Fatalf("web depends_on = %#v", got)
+	}
+	if err := ValidateEnv(cfg, "production"); err != nil {
+		t.Fatalf("ValidateEnv returned error: %v", err)
+	}
+}
+
+func TestLoadBytesAcceptsGuardedPostgresAccessory(t *testing.T) {
+	input := configWithPostgresAccessory(validConfigYAML)
+	cfg, err := LoadBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("LoadBytes returned error: %v", err)
+	}
+	postgres := cfg.Environments["production"].Accessories["postgres"]
+	if postgres.Type != "postgres" || postgres.Image != "postgres:17-alpine" || postgres.Host != "app-1" {
+		t.Fatalf("postgres accessory = %#v", postgres)
+	}
+	if major, ok := PostgresMajor(postgres.Image); !ok || major != "17" {
+		t.Fatalf("PostgresMajor(%q) = %q, %t", postgres.Image, major, ok)
+	}
+	if err := ValidateEnv(cfg, "production"); err != nil {
+		t.Fatalf("ValidateEnv returned error: %v", err)
+	}
+}
+
+func TestValidateRejectsPostgresWithoutGuardableMajor(t *testing.T) {
+	for _, image := range []string{"postgres:latest", "postgres:alpine", "postgres@sha256:abcdef"} {
+		t.Run(image, func(t *testing.T) {
+			input := strings.Replace(configWithPostgresAccessory(validConfigYAML), "postgres:17-alpine", image, 1)
+			cfg, err := LoadBytes([]byte(input))
+			if err != nil {
+				t.Fatalf("LoadBytes returned error: %v", err)
+			}
+			err = Validate(cfg)
+			if err == nil || !strings.Contains(err.Error(), "PostgreSQL major version") {
+				t.Fatalf("expected PostgreSQL major error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsPostgresMissingRequiredSettings(t *testing.T) {
+	input := configWithPostgresAccessory(validConfigYAML)
+	input = strings.Replace(input, "          POSTGRES_DB: app\n          POSTGRES_USER: app\n", "", 1)
+	input = strings.Replace(input, "          - POSTGRES_PASSWORD\n", "", 1)
+	cfg, err := LoadBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("LoadBytes returned error: %v", err)
+	}
+	err = Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "POSTGRES_DB") || !strings.Contains(err.Error(), "POSTGRES_USER") || !strings.Contains(err.Error(), "POSTGRES_PASSWORD") {
+		t.Fatalf("expected required PostgreSQL settings errors, got: %v", err)
+	}
+}
+
+func TestPostgresMajor(t *testing.T) {
+	for image, want := range map[string]string{
+		"postgres:17-alpine":               "17",
+		"postgres:17.4-alpine":             "17",
+		"registry.example/app/postgres:16": "16",
+	} {
+		if got, ok := PostgresMajor(image); !ok || got != want {
+			t.Fatalf("PostgresMajor(%q) = %q, %t; want %q", image, got, ok, want)
+		}
+	}
+	for _, image := range []string{"postgres", "postgres:latest", "postgres:beta", "postgres@sha256:abcdef"} {
+		if got, ok := PostgresMajor(image); ok {
+			t.Fatalf("PostgresMajor(%q) = %q, true", image, got)
+		}
+	}
+}
+
+func TestLoadBytesRejectsUnknownAccessoryFields(t *testing.T) {
+	input := strings.Replace(configWithRedisAccessory(validConfigYAML), "        type: redis", "        type: redis\n        ports: [6379]", 1)
+	_, err := LoadBytes([]byte(input))
+	if err == nil || !strings.Contains(err.Error(), "ports") {
+		t.Fatalf("expected unknown accessory field error, got: %v", err)
+	}
+}
+
+func TestValidateRejectsUnsupportedAccessoryType(t *testing.T) {
+	input := strings.Replace(configWithRedisAccessory(validConfigYAML), "type: redis", "type: mysql", 1)
+	cfg, err := LoadBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("LoadBytes returned error: %v", err)
+	}
+	err = Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), `type must be "postgres" or "redis"`) {
+		t.Fatalf("expected unsupported type error, got: %v", err)
+	}
+}
+
+func TestValidateRejectsUnpinnedAccessoryImage(t *testing.T) {
+	for _, image := range []string{"redis", "redis:latest"} {
+		t.Run(image, func(t *testing.T) {
+			input := strings.Replace(configWithRedisAccessory(validConfigYAML), "redis:7-alpine", image, 1)
+			cfg, err := LoadBytes([]byte(input))
+			if err != nil {
+				t.Fatalf("LoadBytes returned error: %v", err)
+			}
+			err = Validate(cfg)
+			if err == nil || !strings.Contains(err.Error(), "explicit non-latest tag or digest") {
+				t.Fatalf("expected pinned image error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsAccessoryUnknownHostAndSecret(t *testing.T) {
+	input := configWithRedisAccessory(validConfigYAML)
+	input = strings.Replace(input, "host: app-1\n        secrets:\n          - REDIS_PASSWORD", "host: data-1\n        secrets:\n          - MISSING_PASSWORD", 1)
+	cfg, err := LoadBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("LoadBytes returned error: %v", err)
+	}
+	err = Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "data-1") || !strings.Contains(err.Error(), "MISSING_PASSWORD") || !strings.Contains(err.Error(), "REDIS_PASSWORD") {
+		t.Fatalf("expected host and secret errors, got: %v", err)
+	}
+}
+
+func TestValidateRejectsAccessoryEnvSecretDuplicate(t *testing.T) {
+	input := strings.Replace(configWithRedisAccessory(validConfigYAML), "        secrets:\n          - REDIS_PASSWORD", "        env:\n          REDIS_PASSWORD: unsafe\n        secrets:\n          - REDIS_PASSWORD", 1)
+	cfg, err := LoadBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("LoadBytes returned error: %v", err)
+	}
+	err = Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), `defines "REDIS_PASSWORD" in both env and secrets`) {
+		t.Fatalf("expected duplicate env/secret error, got: %v", err)
+	}
+}
+
+func TestValidateRejectsUnknownOrRemoteAccessoryDependency(t *testing.T) {
+	for name, mutate := range map[string]func(string) string{
+		"unknown": func(input string) string {
+			return strings.Replace(input, "depends_on: [redis]", "depends_on: [missing]", 1)
+		},
+		"remote": func(input string) string {
+			return strings.Replace(input, "hosts: [app-1]\n        depends_on: [redis]", "hosts: [worker-1]\n        depends_on: [redis]", 1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := mutate(configWithRedisAccessory(validConfigYAML))
+			cfg, err := LoadBytes([]byte(input))
+			if err != nil {
+				t.Fatalf("LoadBytes returned error: %v", err)
+			}
+			err = Validate(cfg)
+			if err == nil || !strings.Contains(err.Error(), "depends_on") {
+				t.Fatalf("expected dependency error, got: %v", err)
+			}
+		})
+	}
+}
+
+func configWithRedisAccessory(input string) string {
+	input = strings.Replace(input, "    - REDIS_URL\n", "    - REDIS_URL\n    - REDIS_PASSWORD\n", 1)
+	input = strings.Replace(input, "    services:\n", `    accessories:
+      redis:
+        type: redis
+        image: redis:7-alpine
+        host: app-1
+        secrets:
+          - REDIS_PASSWORD
+        storage:
+          volume: redis-data
+    services:
+`, 1)
+	return strings.Replace(input, "        hosts: [app-1]\n", "        hosts: [app-1]\n        depends_on: [redis]\n", 1)
+}
+
+func configWithPostgresAccessory(input string) string {
+	input = strings.Replace(input, "    - REDIS_URL\n", "    - REDIS_URL\n    - POSTGRES_PASSWORD\n", 1)
+	return strings.Replace(input, "    services:\n", `    accessories:
+      postgres:
+        type: postgres
+        image: postgres:17-alpine
+        host: app-1
+        env:
+          POSTGRES_DB: app
+          POSTGRES_USER: app
+        secrets:
+          - POSTGRES_PASSWORD
+        storage:
+          volume: postgres-data
+    services:
+`, 1)
 }
 
 func TestValidateRejectsRoutedServiceWithoutHealthPath(t *testing.T) {

@@ -16,11 +16,16 @@ slipway status -c slipway.yml --env production [--dry-run]
 slipway sync-proxy -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
 slipway cleanup -c slipway.yml --env production [--dry-run] [--verbose] [--lock-timeout 30m]
 slipway logs -c slipway.yml --env production --service web [--host app-1] [--color active] [--tail 100] [--follow] [--dry-run]
+slipway accessory apply -c slipway.yml --env production [--name <accessory>] [--dry-run] [--verbose] [--lock-timeout 30m]
+slipway accessory status -c slipway.yml --env production [--name <accessory>] [--dry-run]
+slipway accessory logs -c slipway.yml --env production --name <accessory> [--tail 100] [--follow] [--dry-run]
+slipway accessory restart -c slipway.yml --env production --name <accessory> [--dry-run] [--verbose] [--lock-timeout 30m]
+slipway accessory exec -c slipway.yml --env production --name <accessory> [--dry-run] -- command [args...]
 slipway secrets exec -c slipway.yml --secret NAME [--secret NAME ...] [--dry-run] -- command [args...]
 slipway version
 ```
 
-`provision`, `deploy`, `rollback`, `status`, `sync-proxy`, `cleanup`, and `logs` execute by default. Normal execution prints concise progress without dumping generated shell. Use `--verbose` on mutating commands to include non-sensitive generated shell, or `--dry-run` to print the detailed command plan without running Docker or SSH commands. Sensitive commands are always redacted.
+Commands execute by default. Normal execution prints concise progress without dumping generated shell. Use `--verbose` on supported mutating commands to include non-sensitive generated shell, or `--dry-run` to print the detailed command plan without running Docker or SSH commands. Sensitive commands are always redacted.
 
 Subprocess output is indented beneath its step. Routine successful login, image-pull, and Caddy messages are compacted, while warnings remain visible; failures replay the captured details. Successful deploys and rollbacks finish with the active color, release, and total elapsed time.
 
@@ -87,15 +92,16 @@ Useful starting points:
 
 1. Load the config with strict YAML field validation.
 2. Resolve named secrets at deploy time from the local environment or an optional fetch command.
-3. Build and push each service image with a release tag.
-4. SSH to the configured hosts.
-5. Upload restrictive env files under `/opt/slipway/<project>/<env>/secrets`.
-6. Start the inactive color beside the active container.
-7. Run configured HTTP health checks for every service that defines one.
-8. Reload Caddy once per proxy host, only after health checks pass, with host-local routes.
-9. Record the active color and release under `/opt/slipway/<project>/<env>/state`.
-10. For services not referenced by `proxy.routes`, stop the previous color after state is recorded. The previous container is kept for rollback, but is not left running.
-11. Clean up old release env files and image tags after successful state recording.
+3. Acquire the deploy lock and verify declared accessory dependencies exist, are running, and are healthy.
+4. Build and push each service image with a release tag.
+5. SSH to the configured hosts.
+6. Upload restrictive env files under `/opt/slipway/<project>/<env>/secrets`.
+7. Start the inactive color beside the active container.
+8. Run configured HTTP health checks for every service that defines one.
+9. Reload Caddy once per proxy host, only after health checks pass, with host-local routes.
+10. Record the active color and release under `/opt/slipway/<project>/<env>/state`.
+11. For services not referenced by `proxy.routes`, stop the previous color after state is recorded. The previous container is kept for rollback, but is not left running.
+12. Clean up old release env files and image tags after successful state recording.
 
 Resolved secret values are passed through stdin and are not printed in plans, logs, errors, or tests.
 
@@ -134,7 +140,7 @@ environments:
       releases: 3
 ```
 
-The active release and immediate previous rollback release are always kept, even when they exceed the numeric retention limit. Cleanup removes old service env files under `/opt/slipway/<project>/<env>/secrets` and old Docker image tags for the configured service image repository. It does not resolve secrets, log in to the registry, build, push, upload env files, switch Caddy, mutate state, stream logs, or delete the active or previous release artifacts.
+The active release and immediate previous rollback release are always kept, even when they exceed the numeric retention limit. Cleanup removes old service env files under `/opt/slipway/<project>/<env>/secrets` and old Docker image tags for the configured service image repository. It does not resolve secrets, log in to the registry, build, push, upload env files, switch Caddy, mutate state, stream logs, or delete the active or previous release artifacts. Cleanup never targets accessory containers, env files, or volumes.
 
 Deploy runs cleanup after successful state recording and after stopping previous containers for non-routed services. Cleanup can also be inspected or run directly:
 
@@ -157,6 +163,106 @@ Options:
 - `--dry-run` prints the generated SSH/Docker command plan without connecting to hosts.
 
 `logs` does not build images, push images, upload env files, switch Caddy, mutate state, log in to the registry, or resolve secrets, so it does not need registry or secret-provider access. Slipway does not add secret values to the generated log command or dry-run output. Application logs are produced by the application itself, so operators should still treat log output as operational data that may contain app-provided sensitive values.
+
+## Accessories
+
+Accessories are stable persistent containers managed separately from blue/green application services. Redis and PostgreSQL are supported presets. PostgreSQL images must have a tag beginning with an explicit major version, such as `postgres:17-alpine`, so Slipway can guard major upgrades.
+
+```yaml
+secrets:
+  names:
+    - POSTGRES_PASSWORD
+    - REDIS_PASSWORD
+
+environments:
+  production:
+    servers:
+      app-1:
+        host: 203.0.113.10
+        ssh_user: deploy
+        host_ssh_port: 22
+    accessories:
+      postgres:
+        type: postgres
+        image: postgres:17-alpine
+        host: app-1
+        env:
+          POSTGRES_DB: demo
+          POSTGRES_USER: demo
+        secrets:
+          - POSTGRES_PASSWORD
+        storage:
+          volume: demo-postgres-data
+      redis:
+        type: redis
+        image: redis:7-alpine
+        host: app-1
+        secrets:
+          - REDIS_PASSWORD
+        storage:
+          volume: demo-redis-data
+    services:
+      web:
+        # existing image/build fields
+        hosts: [app-1]
+        depends_on: [postgres, redis]
+        env:
+          POSTGRES_HOST: postgres
+          POSTGRES_PORT: "5432"
+          POSTGRES_DB: demo
+          POSTGRES_USER: demo
+          REDIS_HOST: redis
+          REDIS_PORT: "6379"
+        secrets:
+          - POSTGRES_PASSWORD
+          - REDIS_PASSWORD
+```
+
+The accessory name becomes its stable Docker network alias, so `postgres` and `redis` are reachable only from services on the same configured host and project network. Slipway does not publish accessory ports. Validation rejects unpinned or `latest` images, undefined secrets, missing named volumes, unknown hosts, and dependencies that cross host-local Docker networks.
+
+After provisioning the target hosts, apply accessories explicitly before the first application deploy:
+
+```sh
+slipway accessory apply -c slipway.yml --env production --dry-run
+slipway accessory apply -c slipway.yml --env production
+```
+
+`accessory apply` resolves only the selected accessories' secrets, acquires the same host lock used by deploys, uploads a mode-`0600` env file, creates the project network and named volume when absent, and creates or explicitly reconciles one stable container. Redis enables append-only persistence and password authentication. PostgreSQL uses its official image entrypoint, password authentication, and a persistent data volume. Reapplying unchanged configuration is idempotent. A changed image, environment, or secret recreates the container after the image pull, while preserving the named volume. Changing the configured volume for an existing container is refused. `accessory restart` uses the same lock so it cannot race an application deploy.
+
+For PostgreSQL, changing the configured image to another major version is refused before Slipway pulls an image or replaces the container. Perform a documented database migration separately, then reconcile the container deliberately. A same-major image change is allowed with a warning and preserves the volume.
+
+Before an upgrade, take a logical backup and prove that it restores into a disposable database rather than production:
+
+```sh
+mkdir -p backups
+slipway accessory exec -c slipway.yml --env production --name postgres -- \
+  sh -lc 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+  > backups/postgres.dump
+
+slipway accessory exec -c slipway.yml --env production --name postgres -- \
+  sh -lc 'dropdb -U "$POSTGRES_USER" --if-exists slipway_restore_drill && createdb -U "$POSTGRES_USER" slipway_restore_drill'
+slipway accessory exec -c slipway.yml --env production --name postgres -- \
+  sh -lc 'pg_restore -U "$POSTGRES_USER" -d slipway_restore_drill --exit-on-error' \
+  < backups/postgres.dump
+slipway accessory exec -c slipway.yml --env production --name postgres -- \
+  sh -lc 'psql -U "$POSTGRES_USER" -d slipway_restore_drill -c "SELECT current_database();"'
+slipway accessory exec -c slipway.yml --env production --name postgres -- \
+  sh -lc 'dropdb -U "$POSTGRES_USER" slipway_restore_drill'
+```
+
+Application deploys never pull, recreate, restart, or update accessories. A service's `depends_on` entries are checked after the deploy lock is acquired and before application images are built. The deploy stops if a dependency is absent, stopped, or unhealthy.
+
+Operational commands do not resolve secrets:
+
+```sh
+slipway accessory status -c slipway.yml --env production
+slipway accessory logs -c slipway.yml --env production --name redis --tail 100
+slipway accessory restart -c slipway.yml --env production --name redis
+slipway accessory exec -c slipway.yml --env production --name redis -- \
+  sh -lc 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning PING'
+```
+
+There is deliberately no accessory `destroy` command. Slipway cleanup has no accessory or volume deletion path.
 
 ## Rollback
 
@@ -183,6 +289,7 @@ secrets:
   names:
     - REGISTRY_PASSWORD
     - DATABASE_URL
+    - REDIS_PASSWORD
 
 environments:
   production:
@@ -198,6 +305,15 @@ environments:
         - host: app.example.com
           service: web
           tls: true
+    accessories:
+      redis:
+        type: redis
+        image: redis:7-alpine
+        host: app-1
+        secrets:
+          - REDIS_PASSWORD
+        storage:
+          volume: demo-redis-data
     services:
       web:
         image: ghcr.io/example/demo-web
@@ -206,13 +322,17 @@ environments:
           dockerfile: Dockerfile
           platform: linux/amd64
         hosts: [app-1]
+        depends_on: [redis]
         internal_port: 3000
         health_check:
           path: /healthz
         env:
           RACK_ENV: production
+          REDIS_HOST: redis
+          REDIS_PORT: "6379"
         secrets:
           - DATABASE_URL
+          - REDIS_PASSWORD
 ```
 
 ### Required Fields
@@ -231,6 +351,7 @@ Environment:
 - `servers`
 - `services`
 - `proxy.routes` when HTTP traffic should be routed through Caddy
+- `accessories` when stable persistent containers are needed
 
 Server:
 
@@ -244,6 +365,16 @@ Service:
 - `build.context`
 - `hosts`
 - `internal_port` and `health_check.path` for services referenced by `proxy.routes`
+- `depends_on` when the service requires declared healthy accessories before deploy
+
+Accessory:
+
+- `type` (`postgres` or `redis`)
+- an explicitly tagged or digest-pinned `image`; `latest` is rejected. PostgreSQL tags must begin with the major version
+- `host`
+- `storage.volume`
+- `REDIS_PASSWORD` in `secrets` for Redis
+- `POSTGRES_DB` and `POSTGRES_USER` in `env`, plus `POSTGRES_PASSWORD` in `secrets`, for PostgreSQL
 
 Set `build.platform` when the build machine architecture differs from the target server, for example `linux/amd64` when building on Apple Silicon for an x86_64 Ubuntu host.
 
@@ -268,7 +399,7 @@ secrets:
     - DATABASE_URL
 ```
 
-Every service secret and registry password secret must be listed in `secrets.names`. `registry.password` is accepted as an additive form for configs that prefer a list of password secret names:
+Every service or accessory secret and the registry password secret must be listed in `secrets.names`. `registry.password` is accepted as an additive form for configs that prefer a list of password secret names:
 
 ```yaml
 registry:
@@ -304,14 +435,16 @@ slipway secrets exec -c slipway.yml --secret HCLOUD_TOKEN -- \
 This does not mutate your current shell environment, and `--dry-run` prints a
 redacted command plan without resolving or printing secret values. Deploy only
 resolves the registry password secret plus service secrets used by the selected
-environment, so extra names in `secrets.names` can be used by other commands
-without being fetched on every deploy.
+environment. `slipway accessory apply` separately resolves only the selected
+accessories' secrets. Extra names in `secrets.names` can therefore be used by
+other commands without being fetched on every deploy or accessory operation.
 
 ## Architecture
 
 ```text
 cmd/slipway
   internal/cli        CLI parsing and command execution
+  internal/accessory  Stable persistent Docker accessory lifecycle
   internal/console    TTY-aware styling and structured progress output
   internal/config     YAML schema, defaults, strict loading, validation
   internal/planner    Blue/green orchestration order
@@ -323,7 +456,7 @@ cmd/slipway
   internal/state      Remote status parsing and reporting
 ```
 
-Docker-specific command generation stays behind `internal/runtime.Runtime`. Caddy-specific command generation stays behind `internal/proxy.Manager`.
+Blue/green Docker command generation stays behind `internal/runtime.Runtime`. Persistent accessory commands stay behind the focused `internal/accessory.Manager`; they are not added to the application runtime interface. Caddy-specific command generation stays behind `internal/proxy.Manager`.
 
 ## Development
 
@@ -346,6 +479,11 @@ go run ./cmd/slipway sync-proxy -c slipway.example.yml --env production --dry-ru
 go run ./cmd/slipway cleanup -c slipway.example.yml --env production --dry-run
 go run ./cmd/slipway logs -c slipway.example.yml --env production --service web --dry-run
 go run ./cmd/slipway logs -c slipway.example.yml --env production --service web --color previous --tail 50 --dry-run
+go run ./cmd/slipway accessory apply -c slipway.example.yml --env production --dry-run
+go run ./cmd/slipway accessory status -c slipway.example.yml --env production --dry-run
+go run ./cmd/slipway accessory logs -c slipway.example.yml --env production --name redis --dry-run
+go run ./cmd/slipway accessory restart -c slipway.example.yml --env production --name redis --dry-run
+go run ./cmd/slipway accessory exec -c slipway.example.yml --env production --name redis --dry-run -- redis-cli PING
 ```
 
 Release steps live in [`docs/releasing.md`](./docs/releasing.md).

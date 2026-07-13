@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s4m1nd/slipway/internal/accessory"
 	"github.com/s4m1nd/slipway/internal/config"
 	"github.com/s4m1nd/slipway/internal/proxy"
 	"github.com/s4m1nd/slipway/internal/release"
@@ -20,8 +21,9 @@ type Planner struct {
 	Env     config.Environment
 	Secrets map[string]string
 
-	Runtime iruntime.Runtime
-	Proxy   proxy.Manager
+	Runtime   iruntime.Runtime
+	Proxy     proxy.Manager
+	Accessory accessory.Manager
 }
 
 type StatusTarget struct {
@@ -77,6 +79,7 @@ func New(cfg config.Config, envName string) (*Planner, error) {
 			ListenHTTP:  env.Proxy.HTTPPort(),
 			ListenHTTPS: env.Proxy.HTTPSPort(),
 		},
+		Accessory: accessory.NewDocker(cfg.Project, envName, cfg.Defaults.Root),
 	}, nil
 }
 
@@ -120,7 +123,7 @@ func (p *Planner) Provision() remote.Plan {
 
 func (p *Planner) Deploy(now time.Time) (remote.Plan, error) {
 	rel := release.New(now)
-	var commands []remote.Command
+	commands := p.accessoryDependencyCommands()
 	registryPassword := p.Secrets[p.Config.Registry.PasswordSecret]
 
 	commands = append(commands, p.Runtime.LoginLocal(p.Config.Registry, registryPassword))
@@ -198,6 +201,36 @@ func (p *Planner) Deploy(now time.Time) (remote.Plan, error) {
 		Subtitle: "Release " + rel.ID,
 		Commands: commands,
 	}, nil
+}
+
+func (p *Planner) accessoryDependencyCommands() []remote.Command {
+	if p.Accessory == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, serviceName := range sortedServiceNames(p.Env.Services) {
+		for _, name := range p.Env.Services[serviceName].DependsOn {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	commands := make([]remote.Command, 0, len(names))
+	for _, name := range names {
+		configured, ok := p.Env.Accessories[name]
+		if !ok {
+			continue
+		}
+		server, ok := p.Env.Servers[configured.Host]
+		if !ok {
+			continue
+		}
+		commands = append(commands, p.Accessory.Verify(server, name, configured))
+	}
+	return commands
 }
 
 func (p *Planner) Cleanup() remote.Plan {

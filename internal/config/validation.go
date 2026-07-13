@@ -203,13 +203,70 @@ func validateEnvironment(ve *ValidationError, envName string, env Environment, d
 	}
 
 	serverNames := serverSet(env.Servers)
+	for accessoryName, accessory := range env.Accessories {
+		validateAccessory(ve, path+".accessories."+accessoryName, accessoryName, accessory, serverNames, declaredSecrets)
+	}
 	if len(env.Services) == 0 {
 		ve.add("%s.services must contain at least one service", path)
 	}
 	for serviceName, service := range env.Services {
-		validateService(ve, path+".services."+serviceName, serviceName, service, serverNames, declaredSecrets)
+		validateService(ve, path+".services."+serviceName, serviceName, service, serverNames, env.Accessories, declaredSecrets)
 	}
 	validateProxy(ve, path, env)
+}
+
+func validateAccessory(ve *ValidationError, path string, name string, accessory Accessory, serverNames map[string]bool, declaredSecrets map[string]bool) {
+	validateSafeName(ve, path, name)
+	switch accessory.Type {
+	case "postgres", "redis":
+	case "":
+		ve.add("%s.type is required", path)
+	default:
+		ve.add("%s.type must be \"postgres\" or \"redis\", got %q", path, accessory.Type)
+	}
+	if strings.TrimSpace(accessory.Image) == "" {
+		ve.add("%s.image is required", path)
+	} else if !hasPinnedImageReference(accessory.Image) {
+		ve.add("%s.image must use an explicit non-latest tag or digest, got %q", path, accessory.Image)
+	}
+
+	host := strings.TrimSpace(accessory.Host)
+	if host == "" {
+		ve.add("%s.host is required", path)
+	} else {
+		validateSafeName(ve, path+".host", host)
+		if !serverNames[host] {
+			ve.add("%s.host references unknown server %q", path, host)
+		}
+	}
+
+	volume := strings.TrimSpace(accessory.Storage.Volume)
+	if volume == "" {
+		ve.add("%s.storage.volume is required", path)
+	} else {
+		validateSafeName(ve, path+".storage.volume", volume)
+	}
+	validateEnvVars(ve, path+".env", accessory.Env)
+	validateEnvSecretDuplicates(ve, path, accessory.Env, accessory.Secrets)
+	validateSecretReferences(ve, path+".secrets", accessory.Secrets, declaredSecrets)
+	switch accessory.Type {
+	case "redis":
+		if !containsString(accessory.Secrets, "REDIS_PASSWORD") {
+			ve.add("%s.secrets must include REDIS_PASSWORD", path)
+		}
+	case "postgres":
+		if !containsString(accessory.Secrets, "POSTGRES_PASSWORD") {
+			ve.add("%s.secrets must include POSTGRES_PASSWORD", path)
+		}
+		for _, name := range []string{"POSTGRES_DB", "POSTGRES_USER"} {
+			if strings.TrimSpace(accessory.Env[name]) == "" {
+				ve.add("%s.env.%s is required", path, name)
+			}
+		}
+		if _, ok := PostgresMajor(accessory.Image); strings.TrimSpace(accessory.Image) != "" && !ok {
+			ve.add("%s.image tag must start with an explicit PostgreSQL major version, got %q", path, accessory.Image)
+		}
+	}
 }
 
 func validateProxy(ve *ValidationError, path string, env Environment) {
@@ -244,7 +301,7 @@ func validateProxy(ve *ValidationError, path string, env Environment) {
 	}
 }
 
-func validateService(ve *ValidationError, path string, name string, service Service, serverNames map[string]bool, declaredSecrets map[string]bool) {
+func validateService(ve *ValidationError, path string, name string, service Service, serverNames map[string]bool, accessories map[string]Accessory, declaredSecrets map[string]bool) {
 	validateSafeName(ve, path, name)
 	if strings.TrimSpace(service.Image) == "" {
 		ve.add("%s.image is required", path)
@@ -254,12 +311,13 @@ func validateService(ve *ValidationError, path string, name string, service Serv
 	}
 	validateBuild(ve, path+".build", service.Build)
 	validateHostReferences(ve, path+".hosts", service.Hosts, serverNames)
+	validateAccessoryDependencies(ve, path+".depends_on", service, accessories)
 	if service.InternalPort < 0 {
 		ve.add("%s.internal_port must not be negative", path)
 	}
 	validateHealthCheck(ve, path+".health_check", service.HealthCheck)
 	validateEnvVars(ve, path+".env", service.Env)
-	validateEnvSecretDuplicates(ve, path, service)
+	validateEnvSecretDuplicates(ve, path, service.Env, service.Secrets)
 	validateSecretReferences(ve, path+".secrets", service.Secrets, declaredSecrets)
 }
 
@@ -381,19 +439,92 @@ func validateEnvVars(ve *ValidationError, path string, env map[string]string) {
 	}
 }
 
-func validateEnvSecretDuplicates(ve *ValidationError, path string, service Service) {
-	if len(service.Env) == 0 || len(service.Secrets) == 0 {
+func validateEnvSecretDuplicates(ve *ValidationError, path string, env map[string]string, secrets []string) {
+	if len(env) == 0 || len(secrets) == 0 {
 		return
 	}
 	envNames := map[string]bool{}
-	for key := range service.Env {
+	for key := range env {
 		envNames[key] = true
 	}
-	for _, secret := range service.Secrets {
+	for _, secret := range secrets {
 		if envNames[secret] {
 			ve.add("%s defines %q in both env and secrets", path, secret)
 		}
 	}
+}
+
+func validateAccessoryDependencies(ve *ValidationError, path string, service Service, accessories map[string]Accessory) {
+	seen := map[string]bool{}
+	for _, name := range service.DependsOn {
+		validateSafeName(ve, path+"."+name, name)
+		if seen[name] {
+			ve.add("%s contains duplicate accessory %q", path, name)
+			continue
+		}
+		seen[name] = true
+		accessory, ok := accessories[name]
+		if !ok {
+			ve.add("%s references unknown accessory %q", path, name)
+			continue
+		}
+		for _, host := range service.Hosts {
+			if host != accessory.Host {
+				ve.add("%s accessory %q runs on %q but service host %q cannot reach its host-local Docker network alias", path, name, accessory.Host, host)
+			}
+		}
+	}
+}
+
+func hasPinnedImageReference(image string) bool {
+	image = strings.TrimSpace(image)
+	if image == "" || strings.ContainsAny(image, "\n\r\t ") {
+		return false
+	}
+	if before, digest, ok := strings.Cut(image, "@"); ok {
+		return before != "" && digest != "" && strings.Contains(digest, ":")
+	}
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon <= lastSlash || lastColon == len(image)-1 {
+		return false
+	}
+	return !strings.EqualFold(image[lastColon+1:], "latest")
+}
+
+// PostgresMajor returns the leading major version from a tagged PostgreSQL
+// image reference. Digests alone are insufficient for major-upgrade guards.
+func PostgresMajor(image string) (string, bool) {
+	image = strings.TrimSpace(image)
+	if image == "" || strings.Contains(image, "@") {
+		return "", false
+	}
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon <= lastSlash || lastColon == len(image)-1 {
+		return "", false
+	}
+	tag := image[lastColon+1:]
+	i := 0
+	for i < len(tag) && tag[i] >= '0' && tag[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return "", false
+	}
+	if i < len(tag) && tag[i] != '.' && tag[i] != '-' && tag[i] != '_' {
+		return "", false
+	}
+	return tag[:i], true
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func validateSafeName(ve *ValidationError, path string, name string) {

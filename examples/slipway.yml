@@ -13,6 +13,7 @@ secrets:
     - REGISTRY_PASSWORD
     - DATABASE_URL
     - REDIS_URL
+    - REDIS_PASSWORD
 
 environments:
   production:
@@ -32,6 +33,15 @@ environments:
         - host: app.example.com
           service: web
           tls: true
+    accessories:
+      redis:
+        type: redis
+        image: redis:7-alpine
+        host: app-1
+        secrets:
+          - REDIS_PASSWORD
+        storage:
+          volume: demo-redis-data
     services:
       web:
         image: ghcr.io/example/demo-web
@@ -40,6 +50,7 @@ environments:
           dockerfile: Dockerfile
           platform: linux/amd64
         hosts: [app-1]
+        depends_on: [redis]
         internal_port: 3000
         health_check:
           path: /healthz
@@ -48,9 +59,12 @@ environments:
           retries: 12
         env:
           RACK_ENV: production
+          REDIS_HOST: redis
+          REDIS_PORT: "6379"
         secrets:
           - DATABASE_URL
           - REDIS_URL
+          - REDIS_PASSWORD
       worker:
         image: ghcr.io/example/demo-worker
         build:

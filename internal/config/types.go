@@ -69,10 +69,11 @@ type SecretProvider struct {
 }
 
 type Environment struct {
-	Retention Retention          `json:"retention" yaml:"retention"`
-	Servers   map[string]Server  `json:"servers" yaml:"servers"`
-	Proxy     Proxy              `json:"proxy" yaml:"proxy"`
-	Services  map[string]Service `json:"services" yaml:"services"`
+	Retention   Retention            `json:"retention" yaml:"retention"`
+	Servers     map[string]Server    `json:"servers" yaml:"servers"`
+	Proxy       Proxy                `json:"proxy" yaml:"proxy"`
+	Accessories map[string]Accessory `json:"accessories" yaml:"accessories"`
+	Services    map[string]Service   `json:"services" yaml:"services"`
 }
 
 type Server struct {
@@ -93,10 +94,26 @@ type ProxyRoute struct {
 	TLS     bool   `json:"tls" yaml:"tls"`
 }
 
+// Accessory is a stable, persistent container managed independently from
+// blue/green application releases.
+type Accessory struct {
+	Type    string            `json:"type" yaml:"type"`
+	Image   string            `json:"image" yaml:"image"`
+	Host    string            `json:"host" yaml:"host"`
+	Env     map[string]string `json:"env" yaml:"env"`
+	Secrets []string          `json:"secrets" yaml:"secrets"`
+	Storage AccessoryStorage  `json:"storage" yaml:"storage"`
+}
+
+type AccessoryStorage struct {
+	Volume string `json:"volume" yaml:"volume"`
+}
+
 type Service struct {
 	Image        string            `json:"image" yaml:"image"`
 	Build        Build             `json:"build" yaml:"build"`
 	Hosts        []string          `json:"hosts" yaml:"hosts"`
+	DependsOn    []string          `json:"depends_on" yaml:"depends_on"`
 	InternalPort int               `json:"internal_port" yaml:"internal_port"`
 	HealthCheck  HealthCheck       `json:"health_check" yaml:"health_check"`
 	Env          map[string]string `json:"env" yaml:"env"`

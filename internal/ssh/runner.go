@@ -17,6 +17,7 @@ import (
 )
 
 type Runner struct {
+	Stdin        io.Reader
 	Stdout       io.Writer
 	Stderr       io.Writer
 	Verbose      bool
@@ -59,6 +60,8 @@ func (r Runner) outputLocal(ctx context.Context, command remote.Command) (string
 			defer stdin.Close()
 			_, _ = io.WriteString(stdin, command.Stdin)
 		}()
+	} else if r.Stdin != nil {
+		cmd.Stdin = r.Stdin
 	}
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("local command %q failed: %w", command.Description, err)
@@ -84,6 +87,8 @@ func (r Runner) runCommand(cmd *exec.Cmd, command remote.Command) error {
 			defer stdin.Close()
 			_, _ = io.WriteString(stdin, command.Stdin)
 		}()
+	} else if r.Stdin != nil {
+		cmd.Stdin = r.Stdin
 	}
 
 	if r.Verbose || command.OutputMode == remote.OutputStream {
@@ -217,6 +222,8 @@ func (r Runner) outputSSH(ctx context.Context, command remote.Command) (string, 
 			defer stdin.Close()
 			_, _ = io.WriteString(stdin, command.Stdin)
 		}()
+	} else if r.Stdin != nil {
+		cmd.Stdin = r.Stdin
 	}
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("%s: %q failed: %w", command.Host, command.Description, err)

@@ -110,3 +110,18 @@ func TestRunnerOutputRunsLocalCommandThroughShell(t *testing.T) {
 		t.Fatalf("Output() = %q, want state line", got)
 	}
 }
+
+func TestRunnerForwardsInteractiveStdinWhenCommandHasNoPayload(t *testing.T) {
+	var out bytes.Buffer
+	runner := Runner{Stdin: strings.NewReader("PING\n"), Stdout: &out, Stderr: &out}
+	err := runner.Run(context.Background(), remote.Command{
+		Description: "interactive command",
+		Script:      "read value; printf 'received=%s\\n' \"$value\"",
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if got := out.String(); got != "received=PING\n" {
+		t.Fatalf("output = %q", got)
+	}
+}

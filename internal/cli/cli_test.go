@@ -526,11 +526,143 @@ func TestHelpIncludesEveryMVPCommand(t *testing.T) {
 		"slipway sync-proxy -c slipway.yml --env production [--dry-run]",
 		"slipway cleanup -c slipway.yml --env production [--dry-run]",
 		"slipway logs -c slipway.yml --env production --service web",
+		"slipway accessory apply -c slipway.yml --env production",
+		"slipway accessory status -c slipway.yml --env production",
+		"slipway accessory logs -c slipway.yml --env production --name <accessory>",
+		"slipway accessory restart -c slipway.yml --env production --name <accessory>",
+		"slipway accessory exec -c slipway.yml --env production --name <accessory>",
 		"slipway secrets exec -c slipway.yml --secret NAME",
 		"slipway version",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("help output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestAccessoryApplyDryRunPrintsRedactedRedisPlanWithoutResolvingSecrets(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "slipway.yml")
+	configText := strings.Replace(exampleConfig, "secrets:\n  names:", "secrets:\n  fetch: exit 42\n  names:", 1)
+	if err := os.WriteFile(path, []byte(configText), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := Execute([]string{"accessory", "apply", "-c", path, "--env", "production", "--name", "redis", "--dry-run"}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("accessory apply code=%d stderr=%s", code, errOut.String())
+	}
+	for _, want := range []string{
+		"Apply accessories demo/production",
+		"upload env for accessory redis",
+		"<sensitive command redacted>",
+		"apply accessory redis",
+		"wait for accessory redis health check",
+		"demo_production_redis",
+		"demo-redis-data",
+		"acquire deploy lock",
+		"release deploy lock",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("accessory apply dry-run missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "REDIS_PASSWORD=") || strings.Contains(out.String(), "<redacted>") || strings.Contains(errOut.String(), "exit status") {
+		t.Fatalf("accessory apply dry-run exposed or resolved secrets; stdout=%s stderr=%s", out.String(), errOut.String())
+	}
+}
+
+func TestAccessoryReadAndControlCommandsPrintFocusedDryRuns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "slipway.yml")
+	if err := os.WriteFile(path, []byte(exampleConfig), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "status",
+			args: []string{"accessory", "status", "-c", path, "--env", "production", "--dry-run"},
+			want: []string{"Accessory status demo/production", "inspect accessory redis", "demo_production_redis"},
+		},
+		{
+			name: "logs",
+			args: []string{"accessory", "logs", "-c", path, "--env", "production", "--name", "redis", "--tail", "25", "--follow", "--dry-run"},
+			want: []string{"Logs demo/production accessory redis", "logs for accessory redis", "--tail", "25", "--follow"},
+		},
+		{
+			name: "restart",
+			args: []string{"accessory", "restart", "-c", path, "--env", "production", "--name", "redis", "--dry-run"},
+			want: []string{"Restart demo/production accessory redis", "restart accessory redis", "wait for accessory redis health check"},
+		},
+		{
+			name: "exec",
+			args: []string{"accessory", "exec", "-c", path, "--env", "production", "--name", "redis", "--dry-run", "--", "redis-cli", "PING"},
+			want: []string{"Exec demo/production accessory redis", "exec in accessory redis", "redis-cli", "PING"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			var errOut bytes.Buffer
+			if code := Execute(test.args, &out, &errOut); code != 0 {
+				t.Fatalf("code=%d stderr=%s", code, errOut.String())
+			}
+			for _, want := range test.want {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("output missing %q:\n%s", want, out.String())
+				}
+			}
+		})
+	}
+}
+
+func TestAccessoryCommandsValidateNameAndEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "slipway.yml")
+	if err := os.WriteFile(path, []byte(exampleConfig), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	for name, args := range map[string][]string{
+		"missing env":  {"accessory", "status", "-c", path, "--dry-run"},
+		"missing name": {"accessory", "logs", "-c", path, "--env", "production", "--dry-run"},
+		"unknown name": {"accessory", "restart", "-c", path, "--env", "production", "--name", "cache", "--dry-run"},
+		"missing exec": {"accessory", "exec", "-c", path, "--env", "production", "--name", "redis", "--dry-run"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out bytes.Buffer
+			var errOut bytes.Buffer
+			if code := Execute(args, &out, &errOut); code == 0 {
+				t.Fatalf("expected failure; stdout=%s", out.String())
+			}
+			if errOut.Len() == 0 {
+				t.Fatal("expected a clear error")
+			}
+		})
+	}
+}
+
+func TestDeployDryRunVerifiesButNeverAppliesRedis(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "slipway.yml")
+	if err := os.WriteFile(path, []byte(exampleConfig), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	if code := Execute([]string{"deploy", "-c", path, "--env", "production", "--dry-run"}, &out, &errOut); code != 0 {
+		t.Fatalf("deploy code=%d stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "verify accessory redis is healthy") {
+		t.Fatalf("deploy did not verify Redis dependency:\n%s", out.String())
+	}
+	for _, forbidden := range []string{"apply accessory redis", "redis:7-alpine", "demo-redis-data", "docker volume"} {
+		if strings.Contains(out.String(), forbidden) {
+			t.Fatalf("deploy dry-run mutated or exposed accessory config %q:\n%s", forbidden, out.String())
 		}
 	}
 }
@@ -795,6 +927,7 @@ esac
 printf 'REGISTRY_PASSWORD=registry-secret\n'
 printf 'DATABASE_URL=postgres://example\n'
 printf 'REDIS_URL=redis://example\n'
+printf 'REDIS_PASSWORD=redis-secret\n'
 `)
 	path := filepath.Join(dir, "slipway.yml")
 	if err := os.WriteFile(path, []byte(configWithFetchAndHCLOUD(fetchPath)), 0o644); err != nil {
@@ -828,7 +961,7 @@ exit 0
 	if stringSliceContains(requested, "HCLOUD_TOKEN") {
 		t.Fatalf("deploy requested HCLOUD_TOKEN: %v", requested)
 	}
-	for _, want := range []string{"REGISTRY_PASSWORD", "DATABASE_URL", "REDIS_URL"} {
+	for _, want := range []string{"REGISTRY_PASSWORD", "DATABASE_URL", "REDIS_URL", "REDIS_PASSWORD"} {
 		if !stringSliceContains(requested, want) {
 			t.Fatalf("deploy requested secrets %v, missing %s", requested, want)
 		}
