@@ -375,38 +375,25 @@ func validateSecrets(ve *ValidationError, path string, secrets Secrets) {
 func validateSecretProvider(ve *ValidationError, path string, secrets Secrets) {
 	provider := secrets.Provider
 	providerType := strings.TrimSpace(provider.Type)
-	if strings.TrimSpace(secrets.Fetch) != "" && providerType != "" {
+	providerConfigured := secretProviderConfigured(provider)
+	if strings.TrimSpace(secrets.Fetch) != "" && providerConfigured {
 		ve.add("%s.fetch and %s.provider cannot both be set", path, path)
 		return
 	}
-	if providerType == "" {
+	if !providerConfigured {
 		return
 	}
-	if providerType != "1password" {
-		ve.add("%s.provider.type must be \"1password\", got %q", path, provider.Type)
-		return
-	}
+
 	providerPath := path + ".provider"
-	if strings.TrimSpace(provider.Account) == "" {
-		ve.add("%s.account is required", providerPath)
-	}
-	if strings.TrimSpace(provider.Vault) == "" {
-		ve.add("%s.vault is required", providerPath)
-	}
-	if strings.TrimSpace(provider.Item) == "" {
-		ve.add("%s.item is required", providerPath)
-	}
-	if containsConfigUnsafeChars(provider.Account) || strings.ContainsAny(provider.Account, "\"`\\;/") {
-		ve.add("%s.account contains unsupported characters", providerPath)
-	}
-	if containsConfigUnsafeChars(provider.Vault) || strings.ContainsAny(provider.Vault, "\"`\\;") {
-		ve.add("%s.vault contains unsupported characters", providerPath)
-	}
-	if containsConfigUnsafeChars(provider.Item) || strings.ContainsAny(provider.Item, "\"`\\;") {
-		ve.add("%s.item contains unsupported characters", providerPath)
-	}
-	if strings.ContainsAny(provider.FieldPrefix, "\n\r/") {
-		ve.add("%s.field_prefix contains unsupported characters", providerPath)
+	switch providerType {
+	case "":
+		ve.add("%s.type is required", providerPath)
+	case "1password":
+		validateOnePasswordSecretProvider(ve, providerPath, provider)
+	case "doppler":
+		validateDopplerSecretProvider(ve, providerPath, provider)
+	default:
+		ve.add("%s.type must be \"1password\" or \"doppler\", got %q", providerPath, provider.Type)
 	}
 }
 

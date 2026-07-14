@@ -78,8 +78,10 @@ Secrets:
 - By default, Slipway reads secret names from the local environment, such as
   `REGISTRY_PASSWORD`.
 - `secrets.fetch` can call any command that prints `KEY=VALUE` lines.
-- Only built-in secret provider today is `1password`. Other providers can still
-  be used through `secrets.fetch`.
+- Built-in secret providers are `1password` and `doppler`. Other providers can
+  still be used through `secrets.fetch`.
+- The matching provider CLI is required for a native adapter: `op` for
+  1Password or `doppler` for Doppler.
 
 Useful starting points:
 
@@ -423,6 +425,24 @@ secrets:
 ```
 
 For headless automation, set `OP_SERVICE_ACCOUNT_TOKEN` in the runner environment so `op read` can authenticate without the desktop app. For simple local runs without a configured provider, exporting `REGISTRY_PASSWORD=<ghcr token>` is enough.
+
+For Doppler-backed deployments, select the Doppler project and config in the
+same file:
+
+```yaml
+secrets:
+  provider:
+    type: doppler
+    project: backend
+    config: prd
+  names:
+    - REGISTRY_PASSWORD
+    - DATABASE_URL
+```
+
+Authenticate the Doppler CLI locally or set `DOPPLER_TOKEN` in automation. See
+[`docs/doppler.md`](./docs/doppler.md) for setup, bootstrap-token guidance, and
+Terraform examples.
 
 `slipway secrets exec` resolves selected names from the same `secrets` provider
 and injects them into a child command environment:

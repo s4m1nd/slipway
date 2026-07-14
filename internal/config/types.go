@@ -66,6 +66,8 @@ type SecretProvider struct {
 	Vault       string `json:"vault" yaml:"vault"`
 	Item        string `json:"item" yaml:"item"`
 	FieldPrefix string `json:"field_prefix" yaml:"field_prefix"`
+	Project     string `json:"project" yaml:"project"`
+	Config      string `json:"config" yaml:"config"`
 }
 
 type Environment struct {

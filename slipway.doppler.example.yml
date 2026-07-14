@@ -1,0 +1,49 @@
+project: demo
+
+retention:
+  releases: 5
+
+registry:
+  server: ghcr.io
+  username: demo
+  password_secret: REGISTRY_PASSWORD
+
+secrets:
+  provider:
+    type: doppler
+    project: slipway-demo
+    config: prd
+  names:
+    - REGISTRY_PASSWORD
+    - DATABASE_URL
+    - HCLOUD_TOKEN
+
+environments:
+  production:
+    servers:
+      app-1:
+        host: 203.0.113.10
+        ssh_user: root
+        host_ssh_port: 22
+    proxy:
+      listen_http: :80
+      listen_https: :443
+      routes:
+        - host: app.example.com
+          service: web
+          tls: true
+    services:
+      web:
+        image: ghcr.io/example/demo-web
+        build:
+          context: .
+          dockerfile: Dockerfile
+          platform: linux/amd64
+        hosts: [app-1]
+        internal_port: 3000
+        health_check:
+          path: /healthz
+        env:
+          RACK_ENV: production
+        secrets:
+          - DATABASE_URL

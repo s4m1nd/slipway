@@ -3,6 +3,7 @@ package secrets
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,11 +19,15 @@ type Resolver interface {
 }
 
 func NewResolver(spec config.Secrets) (Resolver, error) {
-	if strings.TrimSpace(spec.Fetch) != "" && strings.TrimSpace(spec.Provider.Type) != "" {
+	providerConfigured := secretProviderConfigured(spec.Provider)
+	if strings.TrimSpace(spec.Fetch) != "" && providerConfigured {
 		return nil, fmt.Errorf("secrets.fetch and secrets.provider cannot both be set")
 	}
 	switch strings.TrimSpace(spec.Provider.Type) {
 	case "":
+		if providerConfigured {
+			return nil, fmt.Errorf("secrets.provider.type is required")
+		}
 		// Continue below.
 	case "1password":
 		return OnePasswordResolver{
@@ -31,6 +36,16 @@ func NewResolver(spec config.Secrets) (Resolver, error) {
 			Item:        spec.Provider.Item,
 			FieldPrefix: spec.Provider.FieldPrefix,
 		}, nil
+	case "doppler":
+		project := strings.TrimSpace(spec.Provider.Project)
+		configName := strings.TrimSpace(spec.Provider.Config)
+		if project == "" {
+			return nil, fmt.Errorf("secrets.provider.project is required for Doppler")
+		}
+		if configName == "" {
+			return nil, fmt.Errorf("secrets.provider.config is required for Doppler")
+		}
+		return DopplerResolver{Project: project, Config: configName}, nil
 	default:
 		return nil, fmt.Errorf("unsupported secret provider %q", spec.Provider.Type)
 	}
@@ -38,6 +53,23 @@ func NewResolver(spec config.Secrets) (Resolver, error) {
 		return EnvResolver{}, nil
 	}
 	return CommandResolver{Command: spec.Fetch}, nil
+}
+
+func secretProviderConfigured(provider config.SecretProvider) bool {
+	for _, value := range []string{
+		provider.Type,
+		provider.Account,
+		provider.Vault,
+		provider.Item,
+		provider.FieldPrefix,
+		provider.Project,
+		provider.Config,
+	} {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 type EnvResolver struct{}
@@ -140,6 +172,63 @@ func (r OnePasswordResolver) readSecret(ctx context.Context, name string) (strin
 		return "", fmt.Errorf("read 1Password secret %s: value contains unsupported newline", name)
 	}
 	return value, nil
+}
+
+// DopplerResolver reads only the requested names from a configured Doppler
+// project and config. The Doppler CLI handles authentication, usually through
+// DOPPLER_TOKEN in automation or a local Doppler login session.
+type DopplerResolver struct {
+	Project string
+	Config  string
+}
+
+type dopplerSecret struct {
+	Computed *string `json:"computed"`
+}
+
+func (r DopplerResolver) Resolve(ctx context.Context, names []string) (map[string]string, error) {
+	resolved := map[string]string{}
+	if len(names) == 0 {
+		return resolved, nil
+	}
+
+	args := []string{
+		"--no-check-version",
+		"--silent",
+		"--json",
+		"secrets",
+		"get",
+		"--project", r.Project,
+		"--config", r.Config,
+	}
+	args = append(args, names...)
+	cmd := exec.CommandContext(ctx, "doppler", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("read Doppler secrets for project %q config %q: %w", r.Project, r.Config, err)
+	}
+
+	var response map[string]dopplerSecret
+	if err := json.Unmarshal(output, &response); err != nil {
+		return nil, fmt.Errorf("decode Doppler secret response: %w", err)
+	}
+
+	var unavailable []string
+	for _, name := range names {
+		secret, ok := response[name]
+		if !ok || secret.Computed == nil {
+			unavailable = append(unavailable, name)
+			continue
+		}
+		if err := validateEnvFileSecret(name, *secret.Computed); err != nil {
+			return nil, err
+		}
+		resolved[name] = *secret.Computed
+	}
+	if len(unavailable) > 0 {
+		return nil, fmt.Errorf("Doppler did not return readable values for: %s", strings.Join(unavailable, ", "))
+	}
+	return resolved, nil
 }
 
 func validateEnvFileSecret(name string, value string) error {

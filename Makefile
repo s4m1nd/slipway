@@ -13,6 +13,7 @@ validate-example:
 	go run ./cmd/slipway validate -c examples/slipway.yml --env production
 	go run ./cmd/slipway validate -c slipway.example.yml --env production
 	go run ./cmd/slipway validate -c slipway.live.example.yml --env production
+	go run ./cmd/slipway validate -c slipway.doppler.example.yml --env production
 
 build:
 	go build -o bin/slipway ./cmd/slipway
@@ -24,6 +25,7 @@ check: fmt-check
 	go run ./cmd/slipway validate -c examples/slipway.yml --env production
 	go run ./cmd/slipway validate -c slipway.example.yml --env production
 	go run ./cmd/slipway validate -c slipway.live.example.yml --env production
+	go run ./cmd/slipway validate -c slipway.doppler.example.yml --env production
 	go run ./cmd/slipway provision -c slipway.example.yml --env production --dry-run
 	go run ./cmd/slipway deploy -c slipway.example.yml --env production --dry-run
 	go run ./cmd/slipway status -c slipway.example.yml --env production --dry-run
