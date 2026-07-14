@@ -2,7 +2,6 @@
 
 Slipway is a blue/green-first deployment CLI for Dockerized apps. It deploys from one `slipway.yml` to SSH-reachable servers, using Docker for the app runtime and Caddy for HTTP routing.
 
-CI systems such as GitHub Actions are only runners. The same command should work from a developer machine when it has the config file, SSH access, registry access, and secret-provider access.
 
 ## Commands
 
